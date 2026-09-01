@@ -22,3 +22,9 @@
 - GitHub fork: `https://github.com/Plaer1/codex-account-manager`.
 - Published commit: `96de4ad` (`Brand as Clanked Edition and add eye cloud icon`).
 - Redeployed process verified at `build/Codex Account Manager Clanked Edition.app/Contents/MacOS/CodexAccountSwitcher`.
+
+## Icon revision
+
+- Added two opposing orange refresh arrows around the eye-cloud mark.
+- The generator preview represented transparency with a checkerboard but saved the first result as RGB; this was detected before deployment.
+- Converted the checkerboard exterior to actual alpha, verified `hasAlpha: yes`, and rebuilt both the `.icns` and 56px status icon from the RGBA source.
