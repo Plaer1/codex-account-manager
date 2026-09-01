@@ -28,3 +28,4 @@
 - Added two opposing orange refresh arrows around the eye-cloud mark.
 - The generator preview represented transparency with a checkerboard but saved the first result as RGB; this was detected before deployment.
 - Converted the checkerboard exterior to actual alpha, verified `hasAlpha: yes`, and rebuilt both the `.icns` and 56px status icon from the RGBA source.
+- Cleaned the remaining light fringe around the cloud and arrows, then verified the corrected RGBA candidate visually before the 1.0 packaging pass.

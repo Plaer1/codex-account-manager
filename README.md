@@ -260,8 +260,8 @@ GitHub Actions builds the macOS app on every push or pull request to `main`.
 To publish a release, push a version tag:
 
 ```bash
-git tag v0.2.1
-git push origin v0.2.1
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 The release workflow will:
