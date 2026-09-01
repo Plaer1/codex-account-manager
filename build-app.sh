@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
-APP_DIR="$BUILD_DIR/Codex Account Switcher.app"
+APP_DIR="$BUILD_DIR/Codex Account Manager Clanked Edition.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -15,6 +15,7 @@ mkdir -p "$BUILD_DIR/module-cache"
 export CLANG_MODULE_CACHE_PATH="$BUILD_DIR/module-cache"
 
 /usr/bin/swiftc \
+  "$ROOT_DIR/AccountIdentity.swift" \
   "$ROOT_DIR/CodexAccountSwitcher.swift" \
   -o "$MACOS_DIR/CodexAccountSwitcher" \
   -framework AppKit \

@@ -28,7 +28,7 @@ chmod +x build-app.sh codex-account-switcher.sh
 Run the app:
 
 ```bash
-open "build/Codex Account Switcher.app"
+open "build/Codex Account Manager Clanked Edition.app"
 ```
 
 Validate the shell script:

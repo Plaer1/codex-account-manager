@@ -133,10 +133,11 @@ private struct RateLimitSnapshot {
 
 struct AuthMetadata {
     let profileName: String
-    let alias: String
+    let nickname: String
     let authURL: URL
     let exists: Bool
     let authMode: String
+    let subjectID: String
     let accountID: String
     let email: String
     let planType: String
@@ -150,13 +151,39 @@ struct AuthMetadata {
     let tokens: [String: String]
     let tokenStatuses: [String: TokenStatus]
     let health: ProfileHealth
+    let identityMismatch: Bool
 
     var tokenLengths: [String: Int] {
         tokens.mapValues { $0.count }
     }
 
     var displayName: String {
-        alias.isEmpty ? profileName : alias
+        nickname.isEmpty ? profileName : nickname
+    }
+
+    func withProfilePresentation(nickname: String, health: ProfileHealth, identityMismatch: Bool) -> AuthMetadata {
+        AuthMetadata(
+            profileName: profileName,
+            nickname: nickname,
+            authURL: authURL,
+            exists: exists,
+            authMode: authMode,
+            subjectID: subjectID,
+            accountID: accountID,
+            email: email,
+            planType: planType,
+            workspaceID: workspaceID,
+            workspaceLabel: workspaceLabel,
+            seatType: seatType,
+            lastRefresh: lastRefresh,
+            capturedAt: capturedAt,
+            desktopState: desktopState,
+            hasAPIKey: hasAPIKey,
+            tokens: tokens,
+            tokenStatuses: tokenStatuses,
+            health: health,
+            identityMismatch: identityMismatch
+        )
     }
 }
 
@@ -166,23 +193,27 @@ struct ProfileRow: Identifiable {
     let displayName: String
     let isCurrentAuth: Bool
     let isActive: Bool
+    let isMachineStateActive: Bool
+    let hasMachineState: Bool
     let subtitle: String
     let meta: String
     let health: ProfileHealth
+    let identityMismatch: Bool
 }
 
 final class AccountStore: ObservableObject {
     @Published var rows: [ProfileRow] = []
     @Published var selectedID: String = currentSelection
     @Published var activeProfile: String = ""
+    @Published var activeStateProfile: String = ""
     @Published var selectedMetadata: AuthMetadata = AccountStore.emptyMetadata()
     @Published var newProfileName: String = ""
     @Published var selectedTokenKey: String = "access_token"
     @Published var revealToken: Bool = false
     @Published var privacyMode: Bool
     @Published var themeMode: AppThemeMode
-    @Published var aliasDraft: String = ""
-    @Published var isEditingAlias: Bool = false
+    @Published var nicknameDraft: String = ""
+    @Published var isEditingNickname: Bool = false
     @Published var profileNameDraft: String = ""
     @Published var isEditingProfileName: Bool = false
     @Published var isWorking: Bool = false
@@ -190,6 +221,7 @@ final class AccountStore: ObservableObject {
     @Published var usageSnapshot: CodexUsageSnapshot = .empty
     @Published var usageSnapshotsByProfile: [String: CodexUsageSnapshot] = [:]
     private var usageValidSinceByProfile: [String: Date] = [:]
+    private var isRefreshingUsage = false
 
     let switcherHome: URL
     private let scriptPath: String
@@ -199,9 +231,7 @@ final class AccountStore: ObservableObject {
     private let liveUsageCacheTTL: TimeInterval = 60
     private let liveUsageCacheLock = NSLock()
     private var liveUsageCache: [String: (fetchedAt: Date, snapshot: RateLimitSnapshot)] = [:]
-    private var autoSaveTimer: Timer?
-    private var isAutoSaving = false
-    private var lastAutoSaveFingerprint = ""
+    private var refreshTimer: Timer?
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -228,20 +258,21 @@ final class AccountStore: ObservableObject {
         usageValidSinceByProfile = loadUsageValidSinceByProfile()
 
         reload()
-        startAutoSaveTimer()
+        startRefreshTimer()
     }
 
     deinit {
-        autoSaveTimer?.invalidate()
+        refreshTimer?.invalidate()
     }
 
     static func emptyMetadata() -> AuthMetadata {
         AuthMetadata(
             profileName: "Current Codex",
-            alias: "",
+            nickname: "",
             authURL: currentAuthURL(),
             exists: false,
             authMode: "-",
+            subjectID: "-",
             accountID: "-",
             email: "-",
             planType: "-",
@@ -254,7 +285,8 @@ final class AccountStore: ObservableObject {
             hasAPIKey: false,
             tokens: [:],
             tokenStatuses: [:],
-            health: ProfileHealth(level: .unknown, title: "Unknown", detail: "No auth metadata loaded.", systemImage: "questionmark.circle.fill")
+            health: ProfileHealth(level: .unknown, title: "Unknown", detail: "No auth metadata loaded.", systemImage: "questionmark.circle.fill"),
+            identityMismatch: false
         )
     }
 
@@ -265,11 +297,30 @@ final class AccountStore: ObservableObject {
     }
 
     func reload(refreshUsage: Bool = true) {
-        activeProfile = run(["active"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let recordedActiveProfile = run(["active"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let recordedStateProfile = run(["active-state"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
         let profileNames = run(["list", "--plain"]).output
             .split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        let liveMetadata = metadataForCurrentAuth()
+        let savedProfiles = profileNames.map { name in
+            (name: name, metadata: metadata(forProfile: name))
+        }
+
+        activeProfile = resolveActiveProfile(
+            recordedProfile: recordedActiveProfile,
+            liveMetadata: liveMetadata,
+            savedProfiles: savedProfiles
+        )
+        if !activeProfile.isEmpty && activeProfile != recordedActiveProfile {
+            _ = run(["record-active", activeProfile])
+        }
+        activeStateProfile = savedProfiles.first(where: {
+            $0.name == recordedStateProfile && $0.metadata.desktopState == "Captured"
+        })?.name ?? ""
+
+        let liveLabel = liveMetadata.email != "-" ? liveMetadata.email : shortAccount(liveMetadata.accountID)
 
         var nextRows: [ProfileRow] = [
             ProfileRow(
@@ -278,14 +329,18 @@ final class AccountStore: ObservableObject {
                 displayName: "Current Codex",
                 isCurrentAuth: true,
                 isActive: false,
-                subtitle: authSummary(for: Self.currentAuthURL()),
+                isMachineStateActive: false,
+                hasMachineState: false,
+                subtitle: liveLabel,
                 meta: "Live auth file",
-                health: metadataForCurrentAuth().health
+                health: liveMetadata.health,
+                identityMismatch: false
             )
         ]
 
-        for name in profileNames {
-            let metadata = metadata(forProfile: name)
+        for profile in savedProfiles {
+            let name = profile.name
+            let metadata = profile.metadata
             let label = metadata.email != "-" ? metadata.email : shortAccount(metadata.accountID)
             let meta = profileContextLine(metadata)
             nextRows.append(
@@ -295,9 +350,12 @@ final class AccountStore: ObservableObject {
                     displayName: metadata.displayName,
                     isCurrentAuth: false,
                     isActive: name == activeProfile,
+                    isMachineStateActive: name == activeStateProfile,
+                    hasMachineState: metadata.desktopState == "Captured",
                     subtitle: label,
                     meta: meta,
-                    health: metadata.health
+                    health: metadata.health,
+                    identityMismatch: metadata.identityMismatch
                 )
             )
         }
@@ -313,7 +371,10 @@ final class AccountStore: ObservableObject {
     }
 
     func refreshUsageSnapshotsAsync() {
-        let profileIDs = rows.map(\.id)
+        guard !isRefreshingUsage else { return }
+        isRefreshingUsage = true
+        let activeID = activeProfile.isEmpty ? currentSelection : activeProfile
+        let profileIDs = rows.filter { $0.id == activeID && !$0.identityMismatch }.map(\.id)
         DispatchQueue.global(qos: .utility).async {
             var snapshots: [String: CodexUsageSnapshot] = [:]
             for profileID in profileIDs {
@@ -324,6 +385,7 @@ final class AccountStore: ObservableObject {
             }
 
             DispatchQueue.main.async {
+                self.isRefreshingUsage = false
                 guard !snapshots.isEmpty else { return }
                 for (profileID, snapshot) in snapshots {
                     self.usageSnapshotsByProfile[profileID] = snapshot
@@ -336,17 +398,7 @@ final class AccountStore: ObservableObject {
     }
 
     func refreshUsageSnapshotAsync() {
-        let profileID = activeProfile.isEmpty ? currentSelection : activeProfile
-        let minDate = usageValidSinceByProfile[profileID]
-        DispatchQueue.global(qos: .utility).async {
-            let snapshot = self.readUsageSnapshot(forProfile: profileID, minRateLimitDate: minDate)
-            DispatchQueue.main.async {
-                guard let snapshot else { return }
-                self.usageSnapshot = snapshot
-                self.usageSnapshotsByProfile[profileID] = snapshot
-                self.saveUsageSnapshotsByProfile()
-            }
-        }
+        refreshUsageSnapshotsAsync()
     }
 
     func cacheUsageSnapshotForActiveProfile() {
@@ -365,7 +417,10 @@ final class AccountStore: ObservableObject {
     }
 
     func usageSnapshot(for profileID: String) -> CodexUsageSnapshot {
-        usageSnapshotsByProfile[profileID] ?? .empty
+        if rows.first(where: { $0.id == profileID })?.identityMismatch == true {
+            return .empty
+        }
+        return usageSnapshotsByProfile[profileID] ?? .empty
     }
 
     private func loadUsageSnapshotsByProfile() -> [String: CodexUsageSnapshot] {
@@ -403,8 +458,8 @@ final class AccountStore: ObservableObject {
         if selectedMetadata.tokens[selectedTokenKey] == nil {
             selectedTokenKey = selectedMetadata.tokens.keys.sorted().first ?? "access_token"
         }
-        aliasDraft = selectedMetadata.alias
-        isEditingAlias = false
+        nicknameDraft = selectedMetadata.nickname
+        isEditingNickname = false
         profileNameDraft = selectedID == currentSelection ? "" : selectedID
         isEditingProfileName = false
     }
@@ -430,27 +485,33 @@ final class AccountStore: ObservableObject {
         return shortAccount(value)
     }
 
-    func saveAlias() {
+    func saveNickname() {
         guard selectedID != currentSelection else {
-            message = "Current Codex cannot be aliased. Capture it as a profile first."
+            message = "Current Codex cannot be nicknamed. Capture it as a profile first."
             return
         }
-        let cleaned = aliasDraft
+        guard !selectedMetadata.identityMismatch else {
+            message = "Repair this profile's account mismatch before changing its nickname."
+            return
+        }
+        let cleaned = nicknameDraft
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            try writeProfileEnvValue(profile: selectedID, key: "local_alias", value: cleaned.isEmpty ? nil : cleaned)
-            message = cleaned.isEmpty ? "Cleared alias for \(selectedID)." : "Saved alias for \(selectedID)."
-            isEditingAlias = false
+            try writeProfileEnvValue(profile: selectedID, key: "local_nickname", value: cleaned.isEmpty ? nil : cleaned)
+            // Remove the legacy key after saving so the new nickname is authoritative.
+            try writeProfileEnvValue(profile: selectedID, key: "local_alias", value: nil)
+            message = cleaned.isEmpty ? "Cleared nickname for \(selectedID)." : "Saved nickname for \(selectedID)."
+            isEditingNickname = false
             reload()
         } catch {
-            message = "Failed to save alias: \(error.localizedDescription)"
+            message = "Failed to save nickname: \(error.localizedDescription)"
         }
     }
 
-    func cancelAliasEdit() {
-        aliasDraft = selectedMetadata.alias
-        isEditingAlias = false
+    func cancelNicknameEdit() {
+        nicknameDraft = selectedMetadata.nickname
+        isEditingNickname = false
     }
 
     func renameSelectedProfile() {
@@ -496,6 +557,10 @@ final class AccountStore: ObservableObject {
             message = "Profile names may only use letters, numbers, dots, dashes, and underscores."
             return
         }
+        if profileExists(trimmed) && !liveAuthMatchesExpectedProfile(trimmed) {
+            message = "The live auth belongs to a different user. Use a new profile name instead of overwriting \(trimmed)."
+            return
+        }
         perform(["capture", trimmed], successMessage: "Captured \(trimmed)") {
             self.selectedID = trimmed
             self.newProfileName = ""
@@ -525,6 +590,7 @@ final class AccountStore: ObservableObject {
             DispatchQueue.main.async {
                 self.isWorking = false
                 if importResult.status == 0 {
+                    try? FileManager.default.removeItem(at: homeURL)
                     self.selectedID = profileName
                     self.message = "Added \(profileName)."
                     self.reload()
@@ -545,16 +611,131 @@ final class AccountStore: ObservableObject {
             message = "\(selectedID) is already the active profile."
             return
         }
-        cacheUsageSnapshotForActiveProfile()
+        if metadata(forProfile: selectedID).identityMismatch {
+            reauthenticateSelectedProfile()
+            return
+        }
         let targetProfile = selectedID
-        perform(["switch", targetProfile], successMessage: "Switched to \(targetProfile)", refreshUsage: false) {
+        perform(["switch", targetProfile], successMessage: "Made \(targetProfile) the active profile", refreshUsage: false) {
             self.markUsageValidFromNow(for: targetProfile)
         }
+    }
+
+    func makeActiveProfile() {
+        guard selectedID != currentSelection else {
+            message = "Choose a saved profile first."
+            return
+        }
+        guard selectedID != activeProfile else {
+            message = "\(selectedID) is already the active profile."
+            return
+        }
+        if metadata(forProfile: selectedID).identityMismatch {
+            reauthenticateSelectedProfile()
+            return
+        }
+        let targetProfile = selectedID
+        perform(["make-active", targetProfile], successMessage: "Made \(targetProfile) the active profile", refreshUsage: false) {
+            self.markUsageValidFromNow(for: targetProfile)
+        }
+    }
+
+    func reauthenticateSelectedProfile() {
+        guard selectedID != currentSelection else {
+            message = "Choose a saved profile first."
+            return
+        }
+        guard !isWorking else { return }
+
+        let targetProfile = selectedID
+        let savedMetadata = rawMetadata(forProfile: targetProfile)
+        guard let expectedIdentity = expectedIdentity(forProfile: targetProfile, savedMetadata: savedMetadata), expectedIdentity.isUsable else {
+            message = "This profile has no stable account identity. Import a fresh auth file instead."
+            return
+        }
+
+        let loginID = UUID()
+        let homeURL = managedHomesRoot.appendingPathComponent(loginID.uuidString, isDirectory: true)
+        isWorking = true
+        message = "Re-authenticating \(targetProfile)… Complete the Codex login in the browser or terminal prompt."
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let loginResult = self.runCodexLogin(homeURL: homeURL, timeout: 180)
+            guard loginResult.status == 0 else {
+                try? FileManager.default.removeItem(at: homeURL)
+                DispatchQueue.main.async {
+                    self.isWorking = false
+                    self.message = loginResult.output.isEmpty ? "Codex login failed." : loginResult.output
+                }
+                return
+            }
+
+            let freshAuthURL = homeURL.appendingPathComponent("auth.json")
+            let freshMetadata = self.readAuthMetadata(name: targetProfile, authURL: freshAuthURL, capturedAt: "-", nickname: "", desktopState: "-")
+            let freshIdentity = self.accountIdentity(from: freshMetadata)
+            guard freshMetadata.exists, freshMetadata.health.level != .error, freshIdentity.isUsable, freshIdentity.matches(expectedIdentity) else {
+                try? FileManager.default.removeItem(at: homeURL)
+                DispatchQueue.main.async {
+                    self.isWorking = false
+                    self.message = "The re-authenticated account did not match \(targetProfile); no token was changed."
+                }
+                return
+            }
+
+            let replaceResult = self.run(["replace-auth", targetProfile, homeURL.path])
+            try? FileManager.default.removeItem(at: homeURL)
+            DispatchQueue.main.async {
+                self.isWorking = false
+                if replaceResult.status == 0 {
+                    self.message = "Updated the auth token for \(targetProfile)."
+                    self.reload(refreshUsage: false)
+                } else {
+                    self.message = replaceResult.output.isEmpty ? "Could not update the auth token." : replaceResult.output
+                }
+            }
+        }
+    }
+
+    func makeCurrentMachineState() {
+        guard selectedID != currentSelection else {
+            message = "Choose a saved profile first."
+            return
+        }
+        guard selectedID != activeStateProfile else {
+            message = "\(selectedID) is already the current machine state."
+            return
+        }
+        let targetProfile = selectedID
+        perform(["make-state", targetProfile], successMessage: "Made \(targetProfile) the current machine state", refreshUsage: false)
+    }
+
+    func updateSelectedAuthToken() {
+        guard selectedID != currentSelection else {
+            message = "Choose a saved profile first."
+            return
+        }
+        let targetProfile = selectedID
+        let currentURL = Self.currentAuthURL()
+        guard let currentData = try? Data(contentsOf: currentURL),
+              !currentData.isEmpty,
+              authLooksUsable(currentData) else {
+            message = "The live auth file is missing or does not contain a usable token. Finish logging in first."
+            return
+        }
+        guard liveAuthMatchesExpectedProfile(targetProfile) else {
+            message = "Live auth belongs to a different account. Log in to \(targetProfile) before updating its token."
+            return
+        }
+        perform(["save-auth", targetProfile], successMessage: "Updated auth token for \(targetProfile)", refreshUsage: false)
     }
 
     func saveActiveProfile() {
         guard !activeProfile.isEmpty else {
             message = "No active profile yet. Capture the current login first."
+            return
+        }
+        guard liveAuthMatchesExpectedProfile(activeProfile) else {
+            message = "The live auth no longer matches \(activeProfile), so it was not overwritten."
             return
         }
         perform(["capture", activeProfile], successMessage: "Saved \(activeProfile)")
@@ -565,7 +746,9 @@ final class AccountStore: ObservableObject {
             message = "No active profile yet. Capture the current login first."
             return
         }
-        perform(["save-auth", activeProfile], successMessage: "Saved fresh token into \(activeProfile)")
+        selectedID = activeProfile
+        loadSelected()
+        updateSelectedAuthToken()
     }
 
     func deleteSelected() {
@@ -573,8 +756,8 @@ final class AccountStore: ObservableObject {
             message = "Current Codex cannot be deleted."
             return
         }
-        guard selectedID != activeProfile else {
-            message = "The active profile cannot be deleted. Switch to another profile first."
+        guard selectedID != activeProfile && selectedID != activeStateProfile else {
+            message = "The active profile or current machine state uses this profile. Change it first, then delete."
             return
         }
         let deleting = selectedID
@@ -691,48 +874,12 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    private func startAutoSaveTimer() {
-        autoSaveTimer?.invalidate()
-        autoSaveTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
-            self?.autoSaveActiveAuthIfNeeded()
+    private func startRefreshTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refreshUsageSnapshotsAsync()
         }
-        autoSaveActiveAuthIfNeeded()
         refreshUsageSnapshotsAsync()
-    }
-
-    private func autoSaveActiveAuthIfNeeded() {
-        guard !isWorking, !isAutoSaving, !activeProfile.isEmpty else { return }
-
-        let profile = activeProfile
-        let currentURL = Self.currentAuthURL()
-        let savedURL = profileAuthURL(profile)
-        guard let currentData = try? Data(contentsOf: currentURL),
-              !currentData.isEmpty,
-              authLooksUsable(currentData) else {
-            return
-        }
-
-        let savedData = try? Data(contentsOf: savedURL)
-        guard savedData != currentData else { return }
-
-        let fingerprint = "\(profile):\(currentData.count):\(currentData.hashValue)"
-        guard fingerprint != lastAutoSaveFingerprint else { return }
-
-        isAutoSaving = true
-        DispatchQueue.global(qos: .utility).async {
-            let result = self.run(["save-auth", profile])
-            DispatchQueue.main.async {
-                self.isAutoSaving = false
-                self.lastAutoSaveFingerprint = fingerprint
-                if result.status == 0 {
-                    self.message = "Auto-saved fresh token into \(profile)."
-                    self.reload()
-                } else {
-                    debugLog("auto save auth failed: \(result.output)")
-                }
-            }
-        }
     }
 
     private func authLooksUsable(_ data: Data) -> Bool {
@@ -799,7 +946,7 @@ final class AccountStore: ObservableObject {
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = ["codex", "login"]
+        task.arguments = ["codex", "-c", "cli_auth_credentials_store=\"file\"", "login"]
         var environment = ProcessInfo.processInfo.environment
         environment["CODEX_HOME"] = homeURL.path
         environment["PATH"] = effectiveLoginPath(environment["PATH"])
@@ -846,7 +993,7 @@ final class AccountStore: ObservableObject {
             name: fallbackID.uuidString,
             authURL: homeURL.appendingPathComponent("auth.json"),
             capturedAt: "-",
-            alias: "",
+            nickname: "",
             desktopState: "-"
         )
         let base: String
@@ -959,12 +1106,7 @@ final class AccountStore: ObservableObject {
             roots.append(codexAppSupport)
         }
         if profileID != currentSelection {
-            let profileSupport = profileAppSupportURL(profileID)
-            roots.append(profileSupport)
-            let managedHome = profileEnvValue(profileID, key: "managed_codex_home", fallback: "")
-            if !managedHome.isEmpty {
-                roots.append(URL(fileURLWithPath: managedHome, isDirectory: true))
-            }
+            roots.append(profileAppSupportURL(profileID))
         }
         var seen: Set<String> = []
         return roots.filter { seen.insert($0.standardizedFileURL.path).inserted }
@@ -974,13 +1116,8 @@ final class AccountStore: ObservableObject {
         var urls: [URL] = []
         if profileID == currentSelection || profileID == activeProfile {
             urls.append(Self.currentAuthURL())
-        }
-        if profileID != currentSelection {
+        } else if profileID != currentSelection {
             urls.append(profileAuthURL(profileID))
-            let managedHome = profileEnvValue(profileID, key: "managed_codex_home", fallback: "")
-            if !managedHome.isEmpty {
-                urls.append(URL(fileURLWithPath: managedHome, isDirectory: true).appendingPathComponent("auth.json"))
-            }
         }
         var seen: Set<String> = []
         return urls.filter { seen.insert($0.standardizedFileURL.path).inserted }
@@ -1027,7 +1164,7 @@ final class AccountStore: ObservableObject {
     }
 
     private func fetchLiveCodexRateLimits(authURL: URL, initialCacheKey: String) -> RateLimitSnapshot? {
-        guard let token = codexAccessTokenFresh(authURL: authURL) else {
+        guard let token = codexAccessTokenReadOnly(authURL: authURL) else {
             return nil
         }
 
@@ -1053,79 +1190,18 @@ final class AccountStore: ObservableObject {
         return snapshot
     }
 
-    private func codexAccessTokenFresh(authURL: URL) -> String? {
+    private func codexAccessTokenReadOnly(authURL: URL) -> String? {
         guard let data = try? Data(contentsOf: authURL),
-              var raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+              let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return nil
         }
-        var tokenMap = raw["tokens"] as? [String: Any] ?? [:]
+        let tokenMap = raw["tokens"] as? [String: Any] ?? [:]
         let accessToken = firstString([tokenMap["access_token"], tokenMap["accessToken"]])
         guard !accessToken.isEmpty else { return nil }
-
-        let refreshThreshold = Date().addingTimeInterval(300)
-        if tokenExpiryDate(accessToken).map({ $0 > refreshThreshold }) ?? true {
-            return accessToken
-        }
-
-        let refreshToken = firstString([tokenMap["refresh_token"], tokenMap["refreshToken"]])
-        guard !refreshToken.isEmpty,
-              let refreshed = refreshCodexTokens(refreshToken: refreshToken) else {
+        if let expiry = tokenExpiryDate(accessToken), expiry <= Date() {
             return nil
         }
-        let newAccessToken = firstString([refreshed["access_token"], refreshed["accessToken"]])
-        guard !newAccessToken.isEmpty else { return nil }
-
-        updateTokenMap(&tokenMap, snakeKey: "access_token", camelKey: "accessToken", value: newAccessToken)
-        for (snakeKey, camelKey) in [("refresh_token", "refreshToken"), ("id_token", "idToken")] {
-            let value = firstString([refreshed[snakeKey], refreshed[camelKey]])
-            if !value.isEmpty {
-                updateTokenMap(&tokenMap, snakeKey: snakeKey, camelKey: camelKey, value: value)
-            }
-        }
-        raw["tokens"] = tokenMap
-        raw["last_refresh"] = ISO8601DateFormatter().string(from: Date())
-        writeCodexAuth(raw, to: authURL)
-        return newAccessToken
-    }
-
-    private func refreshCodexTokens(refreshToken: String) -> [String: Any]? {
-        guard let url = URL(string: "https://auth.openai.com/oauth/token"),
-              let body = formURLEncodedData([
-                ("client_id", "app_EMoamEEZ73f0CkXaXp7hrann"),
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refreshToken)
-              ]) else {
-            return nil
-        }
-        return requestJSON(
-            url: url,
-            method: "POST",
-            headers: [
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json"
-            ],
-            body: body
-        )
-    }
-
-    private func updateTokenMap(_ tokenMap: inout [String: Any], snakeKey: String, camelKey: String, value: String) {
-        tokenMap[snakeKey] = value
-        if tokenMap[camelKey] != nil {
-            tokenMap[camelKey] = value
-        }
-    }
-
-    private func writeCodexAuth(_ raw: [String: Any], to authURL: URL) {
-        guard JSONSerialization.isValidJSONObject(raw),
-              let data = try? JSONSerialization.data(withJSONObject: raw, options: [.prettyPrinted, .sortedKeys]) else {
-            return
-        }
-        do {
-            try data.write(to: authURL, options: .atomic)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
-        } catch {
-            debugLog("could not write refreshed Codex auth: \(error.localizedDescription)")
-        }
+        return accessToken
     }
 
     private func requestJSON(url: URL, method: String, headers: [String: String], body: Data?) -> [String: Any]? {
@@ -1199,19 +1275,6 @@ final class AccountStore: ObservableObject {
         return RateLimitSnapshot(primary: primary, secondary: secondary, observedAt: Date())
     }
 
-    private func formURLEncodedData(_ pairs: [(String, String)]) -> Data? {
-        let body = pairs
-            .map { "\(formEncode($0.0))=\(formEncode($0.1))" }
-            .joined(separator: "&")
-        return body.data(using: .utf8)
-    }
-
-    private func formEncode(_ value: String) -> String {
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: ":#[]@!$&'()*+,;=")
-        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
-    }
-
     private func contextWindowForModel(_ model: String) -> Int {
         let windows = [
             "gpt-5.5": 272000,
@@ -1282,29 +1345,132 @@ final class AccountStore: ObservableObject {
             name: "Current Codex",
             authURL: Self.currentAuthURL(),
             capturedAt: "-",
-            alias: "",
+            nickname: "",
             desktopState: "-"
         )
     }
 
     private func metadata(forProfile name: String) -> AuthMetadata {
-        readAuthMetadata(
+        let savedMetadata = rawMetadata(forProfile: name)
+        guard let expectedIdentity = expectedIdentity(forProfile: name, savedMetadata: savedMetadata) else {
+            return savedMetadata
+        }
+        let savedIdentity = accountIdentity(from: savedMetadata)
+        guard savedIdentity.isUsable, !savedIdentity.matches(expectedIdentity) else {
+            return savedMetadata
+        }
+
+        return savedMetadata.withProfilePresentation(
+            nickname: "",
+            health: ProfileHealth(
+                level: .error,
+                title: "Identity mismatch",
+                detail: "This profile's saved auth belongs to a different user than the account originally attached to it. Switching is blocked until the intended user signs in and updates the auth token.",
+                systemImage: "person.crop.circle.badge.exclamationmark"
+            ),
+            identityMismatch: true
+        )
+    }
+
+    private func rawMetadata(forProfile name: String) -> AuthMetadata {
+        let nickname = profileEnvValue(
+            name,
+            key: "local_nickname",
+            fallback: profileEnvValue(name, key: "local_alias", fallback: "")
+        )
+        return readAuthMetadata(
             name: name,
             authURL: profileAuthURL(name),
             capturedAt: profileEnvValue(name, key: "captured_at"),
-            alias: profileEnvValue(name, key: "local_alias", fallback: ""),
+            nickname: nickname,
             desktopState: profileDesktopState(name)
         )
     }
 
-    private func readAuthMetadata(name: String, authURL: URL, capturedAt: String, alias: String, desktopState: String) -> AuthMetadata {
+    private func accountIdentity(from metadata: AuthMetadata) -> AccountIdentity {
+        AccountIdentity(
+            subjectID: metadata.subjectID,
+            email: metadata.email,
+            accountID: metadata.accountID
+        )
+    }
+
+    private func expectedIdentity(forProfile name: String, savedMetadata: AuthMetadata) -> AccountIdentity? {
+        if let storedIdentity = loadStoredIdentity(forProfile: name), storedIdentity.isUsable {
+            return storedIdentity
+        }
+        let candidate = accountIdentity(from: savedMetadata)
+        guard candidate.isUsable else { return nil }
+
+        try? saveStoredIdentity(candidate, forProfile: name)
+        return candidate
+    }
+
+    private func liveAuthMatchesExpectedProfile(_ name: String) -> Bool {
+        let savedMetadata = rawMetadata(forProfile: name)
+        guard let expectedIdentity = expectedIdentity(forProfile: name, savedMetadata: savedMetadata) else {
+            return false
+        }
+        let liveIdentity = accountIdentity(from: metadataForCurrentAuth())
+        return liveIdentity.isUsable && liveIdentity.matches(expectedIdentity)
+    }
+
+    private func resolveActiveProfile(
+        recordedProfile: String,
+        liveMetadata: AuthMetadata,
+        savedProfiles: [(name: String, metadata: AuthMetadata)]
+    ) -> String {
+        resolveLiveProfile(
+            recordedProfile: recordedProfile,
+            liveIdentity: accountIdentity(from: liveMetadata),
+            candidates: savedProfiles.map {
+                AccountIdentityCandidate(
+                    id: $0.name,
+                    identity: accountIdentity(from: $0.metadata),
+                    hasIdentityMismatch: $0.metadata.identityMismatch
+                )
+            }
+        )
+    }
+
+    private func profileExists(_ name: String) -> Bool {
+        FileManager.default.fileExists(
+            atPath: switcherHome
+                .appendingPathComponent("profiles")
+                .appendingPathComponent(name)
+                .path
+        )
+    }
+
+    private func profileIdentityURL(_ name: String) -> URL {
+        switcherHome
+            .appendingPathComponent("profiles")
+            .appendingPathComponent(name)
+            .appendingPathComponent("identity.json")
+    }
+
+    private func loadStoredIdentity(forProfile name: String) -> AccountIdentity? {
+        let url = profileIdentityURL(name)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(AccountIdentity.self, from: data)
+    }
+
+    private func saveStoredIdentity(_ identity: AccountIdentity, forProfile name: String) throws {
+        let url = profileIdentityURL(name)
+        let data = try JSONEncoder().encode(identity)
+        try data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func readAuthMetadata(name: String, authURL: URL, capturedAt: String, nickname: String, desktopState: String) -> AuthMetadata {
         guard let data = try? Data(contentsOf: authURL), !data.isEmpty else {
             return AuthMetadata(
                 profileName: name,
-                alias: alias,
+                nickname: nickname,
                 authURL: authURL,
                 exists: false,
                 authMode: "-",
+                subjectID: "-",
                 accountID: "-",
                 email: "-",
                 planType: "-",
@@ -1317,16 +1483,18 @@ final class AccountStore: ObservableObject {
                 hasAPIKey: false,
                 tokens: [:],
                 tokenStatuses: [:],
-                health: ProfileHealth(level: .error, title: "Missing auth", detail: "auth.json is missing or empty.", systemImage: "xmark.octagon.fill")
+                health: ProfileHealth(level: .error, title: "Missing auth", detail: "auth.json is missing or empty.", systemImage: "xmark.octagon.fill"),
+                identityMismatch: false
             )
         }
         guard let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return AuthMetadata(
                 profileName: name,
-                alias: alias,
+                nickname: nickname,
                 authURL: authURL,
                 exists: true,
                 authMode: "-",
+                subjectID: "-",
                 accountID: "-",
                 email: "-",
                 planType: "-",
@@ -1339,7 +1507,8 @@ final class AccountStore: ObservableObject {
                 hasAPIKey: false,
                 tokens: [:],
                 tokenStatuses: [:],
-                health: ProfileHealth(level: .error, title: "Invalid auth", detail: "auth.json could not be parsed.", systemImage: "exclamationmark.triangle.fill")
+                health: ProfileHealth(level: .error, title: "Invalid auth", detail: "auth.json could not be parsed.", systemImage: "exclamationmark.triangle.fill"),
+                identityMismatch: false
             )
         }
 
@@ -1366,13 +1535,17 @@ final class AccountStore: ObservableObject {
             accessClaims["email"],
             accessClaims["https://api.openai.com/profile/email"]
         ])
+        let subjectID = firstString([
+            idTokenClaims["sub"],
+            accessClaims["sub"]
+        ])
         let accountID = firstString([
             tokenMap["account_id"],
             tokenMap["accountId"],
-            idTokenClaims["https://api.openai.com/auth"],
+            authClaims["chatgpt_account_id"],
+            authClaims["account_id"],
             idTokenClaims["chatgpt_account_id"],
-            idTokenClaims["sub"],
-            accessClaims["sub"]
+            accessClaims["chatgpt_account_id"]
         ])
         let planType = firstString([
             authClaims["chatgpt_plan_type"],
@@ -1410,10 +1583,11 @@ final class AccountStore: ObservableObject {
 
         return AuthMetadata(
             profileName: name,
-            alias: alias,
+            nickname: nickname,
             authURL: authURL,
             exists: true,
             authMode: stringValue(raw["auth_mode"], fallback: "-"),
+            subjectID: subjectID.isEmpty ? "-" : subjectID,
             accountID: accountID.isEmpty ? "-" : accountID,
             email: email.isEmpty ? "-" : email,
             planType: planType.isEmpty ? "-" : normalizeSlug(planType),
@@ -1426,7 +1600,8 @@ final class AccountStore: ObservableObject {
             hasAPIKey: hasAPIKey,
             tokens: tokens,
             tokenStatuses: statuses,
-            health: health
+            health: health,
+            identityMismatch: false
         )
     }
 
@@ -1683,7 +1858,7 @@ final class AccountStore: ObservableObject {
     }
 
     private func authSummary(for url: URL) -> String {
-        let metadata = readAuthMetadata(name: "Current Codex", authURL: url, capturedAt: "-", alias: "", desktopState: "-")
+        let metadata = readAuthMetadata(name: "Current Codex", authURL: url, capturedAt: "-", nickname: "", desktopState: "-")
         if metadata.email != "-" {
             return metadata.email
         }
@@ -2017,7 +2192,7 @@ struct ManagerView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 8) {
-                        aliasHeader
+                        nicknameHeader
                         if store.selectedID == store.activeProfile {
                             StatusPill(text: "Active", color: .green, systemImage: "checkmark.circle.fill")
                         }
@@ -2057,24 +2232,24 @@ struct ManagerView: View {
         .liquidGlass(cornerRadius: 8, tint: selectedIconColor, isProminent: true)
     }
 
-    private var aliasHeader: some View {
+    private var nicknameHeader: some View {
         HStack(spacing: 6) {
-            if store.isEditingAlias {
-                TextField("Profile alias", text: $store.aliasDraft)
+            if store.isEditingNickname {
+                TextField("Account nickname", text: $store.nicknameDraft)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 250)
                     .onSubmit {
-                        store.saveAlias()
+                        store.saveNickname()
                     }
                 Button {
-                    store.saveAlias()
+                    store.saveNickname()
                 } label: {
                     Image(systemName: "checkmark")
                 }
                 .buttonStyle(.borderless)
                 .disabled(store.isWorking)
                 Button {
-                    store.cancelAliasEdit()
+                    store.cancelNicknameEdit()
                 } label: {
                     Image(systemName: "xmark")
                 }
@@ -2085,13 +2260,13 @@ struct ManagerView: View {
                     .lineLimit(1)
                 if store.selectedID != currentSelection {
                     Button {
-                        store.aliasDraft = store.selectedMetadata.alias
-                        store.isEditingAlias = true
+                        store.nicknameDraft = store.selectedMetadata.nickname
+                        store.isEditingNickname = true
                     } label: {
                         Image(systemName: "pencil")
                     }
                     .buttonStyle(.borderless)
-                    .help("Edit local alias")
+                    .help("Edit account nickname")
                 }
             }
         }
@@ -2182,15 +2357,23 @@ struct ManagerView: View {
 
             HStack(spacing: 10) {
                 Button {
-                    store.switchSelected()
+                    if store.selectedMetadata.identityMismatch {
+                        store.reauthenticateSelectedProfile()
+                    } else {
+                        store.makeActiveProfile()
+                    }
                 } label: {
                     ActionButtonLabel(
-                        title: "Switch",
-                        systemImage: "arrow.triangle.2.circlepath"
+                        title: store.selectedMetadata.identityMismatch ? "Re-authenticate Profile" : "Make Active Profile",
+                        systemImage: store.selectedMetadata.identityMismatch ? "person.badge.key.fill" : "desktopcomputer"
                     )
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
-                .disabled(store.isWorking || store.selectedID == currentSelection || store.selectedID == store.activeProfile)
+                .disabled(
+                    store.isWorking
+                        || store.selectedID == currentSelection
+                        || (!store.selectedMetadata.identityMismatch && store.selectedID == store.activeProfile)
+                )
 
                 Button {
                     store.saveActiveProfile()
@@ -2207,7 +2390,7 @@ struct ManagerView: View {
                     store.saveActiveAuthNow()
                 } label: {
                     ActionButtonLabel(
-                        title: "Save Token",
+                        title: "Update Auth Token",
                         systemImage: "key.fill"
                     )
                 }
@@ -2402,7 +2585,7 @@ struct ManagerView: View {
     }
 
     private var selectedSubtitle: String {
-        if store.selectedMetadata.alias.isEmpty == false, store.selectedMetadata.profileName != "Current Codex" {
+        if store.selectedMetadata.nickname.isEmpty == false, store.selectedMetadata.profileName != "Current Codex" {
             let email = store.selectedMetadata.email != "-" ? store.displaySensitive(store.selectedMetadata.email) : store.selectedMetadata.profileName
             return "\(email) | \(workspaceDisplay)"
         }
@@ -2438,7 +2621,7 @@ struct ManagerView: View {
         if lower.contains("failed") || lower.contains("error") || lower.contains("khong") || lower.contains("cannot") {
             return .red
         }
-        if lower.contains("saved") || lower.contains("captured") || lower.contains("switched") || lower.contains("copied") || lower.contains("added") {
+        if lower.contains("saved") || lower.contains("captured") || lower.contains("switched") || lower.contains("active profile") || lower.contains("copied") || lower.contains("added") {
             return .green
         }
         return .secondary
@@ -3171,173 +3354,162 @@ private struct ManagerDashboardView: View {
     @ObservedObject var store: AccountStore
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-            mainPane
-        }
-        .background(LiquidGlassBackground(themeMode: store.themeMode))
-        .preferredColorScheme(store.themeMode.colorScheme)
-        .tint(store.themeMode.accent)
-        .frame(minWidth: 1120, minHeight: 640)
-    }
+        VStack(spacing: 0) {
+            compactToolbar
+            Divider()
 
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 10) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 34, height: 34)
-                        .background(Color.orange)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Codex")
-                            .font(.system(size: 18, weight: .bold))
-                        Text("Account manager")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+            if savedRows.isEmpty {
+                emptyState
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 12) {
+                        ForEach(savedRows) { row in
+                            AccountQuotaCard(
+                                row: row,
+                                store: store,
+                                snapshot: store.usageSnapshot(for: row.id),
+                                isSelected: store.selectedID == row.id,
+                                privacyMode: store.privacyMode,
+                                canMakeActive: canMakeActive(row),
+                                canUpdateAuth: canUpdateAuth(row),
+                                canMakeState: canMakeState(row),
+                                makeActiveAction: {
+                                    select(row)
+                                    store.makeActiveProfile()
+                                },
+                                reauthenticateAction: {
+                                    select(row)
+                                    store.reauthenticateSelectedProfile()
+                                },
+                                updateAuthAction: {
+                                    select(row)
+                                    store.updateSelectedAuthToken()
+                                },
+                                makeStateAction: {
+                                    select(row)
+                                    store.makeCurrentMachineState()
+                                },
+                                refreshAction: {
+                                    select(row)
+                                    store.refreshUsageSnapshotsAsync()
+                                },
+                                deleteAction: {
+                                    select(row)
+                                    confirmDelete()
+                                }
+                            )
+                        }
                     }
+                    .padding(12)
                 }
-
-                Text("Bare command = \(activeProfileDisplay == "None" ? "default" : activeProfileDisplay)")
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .liquidGlass(cornerRadius: 8, tint: .orange, isProminent: true)
-
-            Spacer()
-
-            HStack(spacing: 8) {
-                Button {
-                    store.setThemeMode(store.themeMode == .dark ? .light : .dark)
-                } label: {
-                    Image(systemName: store.themeMode.systemImage)
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.borderless)
-                .help("Switch theme")
-
-                Button {
-                    store.togglePrivacyMode()
-                } label: {
-                    Image(systemName: store.privacyMode ? "eye.slash" : "eye")
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.borderless)
-                .help(store.privacyMode ? "Show details" : "Hide details")
-
-                Button {
-                    store.openProfilesFolder()
-                } label: {
-                    Image(systemName: "folder")
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.borderless)
-                .help("Profiles folder")
-            }
-            .padding(8)
-            .liquidGlass(cornerRadius: 8, tint: store.themeMode.accent)
-        }
-        .padding(.horizontal, 18)
-        .padding(.top, 54)
-        .padding(.bottom, 18)
-        .frame(width: 270)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(Color.white.opacity(store.themeMode == .dark ? 0.06 : 0.18))
-                .frame(width: 1)
-        }
-    }
-
-    private var mainPane: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            header
-
-            ScrollView {
-                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 18) {
-                    ForEach(store.rows) { row in
-                        AccountQuotaCard(
-                            row: row,
-                            snapshot: store.usageSnapshot(for: row.id),
-                            isSelected: store.selectedID == row.id,
-                            privacyMode: store.privacyMode,
-                            canUse: canUse(row),
-                            useAction: {
-                                select(row)
-                                store.switchSelected()
-                            },
-                            refreshAction: {
-                                select(row)
-                                store.refreshUsageSnapshotsAsync()
-                            },
-                            deleteAction: {
-                                select(row)
-                                confirmDelete()
-                            }
-                        )
-                    }
-                }
-                .padding(.bottom, 28)
             }
 
             HStack(spacing: 8) {
                 Image(systemName: messageIcon)
                     .foregroundStyle(messageColor)
                 Text(statusDisplayText)
-                    .font(.system(size: 12))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .truncationMode(.tail)
                 Spacer()
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .liquidGlass(cornerRadius: 8, tint: messageColor)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial)
         }
-        .padding(.horizontal, 22)
-        .padding(.top, 54)
-        .padding(.bottom, 18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(LiquidGlassBackground(themeMode: store.themeMode))
+        .preferredColorScheme(store.themeMode.colorScheme)
+        .tint(store.themeMode.accent)
+        .frame(minWidth: 520, minHeight: 420)
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text("Codex")
-                .font(.system(size: 26, weight: .bold))
+    private var compactToolbar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 9) {
+                Image(systemName: "person.2.badge.key.fill")
+                    .foregroundStyle(store.themeMode.accent)
+                Text("Codex Accounts")
+                    .font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Button {
+                    store.addAccountWithCodexLogin()
+                } label: {
+                    Image(systemName: "person.badge.plus")
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .help("Add account")
+                .disabled(store.isWorking)
 
-            StatusChip(text: "Ready", color: .green, systemImage: nil)
+                Button {
+                    store.reload()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .help("Refresh account data")
+                .disabled(store.isWorking)
 
-            Spacer()
-
-            Button {
-                store.addAccountWithCodexLogin()
-            } label: {
-                Label("Add account", systemImage: "arrow.right.to.line.compact")
+                Menu {
+                    Button(store.themeMode == .dark ? "Use Light Appearance" : "Use Dark Appearance") {
+                        store.setThemeMode(store.themeMode == .dark ? .light : .dark)
+                    }
+                    Button(store.privacyMode ? "Show Account Details" : "Hide Account Details") {
+                        store.togglePrivacyMode()
+                    }
+                    Divider()
+                    Button("Open Profiles Folder", action: store.openProfilesFolder)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                }
+                .menuStyle(.borderlessButton)
+                .help("Manager options")
             }
-            .buttonStyle(GlassToolbarButtonStyle())
-            .disabled(store.isWorking)
 
-            Button {
-                store.reload()
-            } label: {
-                Label("Refresh quota", systemImage: "arrow.clockwise")
+            HStack(spacing: 7) {
+                StatusChip(text: "Active: \(activeProfileDisplay)", color: .green, systemImage: "checkmark.circle.fill")
+                    .lineLimit(1)
+                StatusChip(text: "State: \(activeStateDisplay)", color: .blue, systemImage: "macwindow")
+                    .lineLimit(1)
+                Spacer(minLength: 0)
             }
-            .buttonStyle(GlassToolbarButtonStyle())
-            .disabled(store.isWorking)
         }
-        .padding(.vertical, 22)
-        .padding(.horizontal, 22)
-        .liquidGlass(cornerRadius: 8, tint: store.themeMode.accent, isProminent: true)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial)
     }
 
     private var gridColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 360, maximum: 440), spacing: 18)]
+        [GridItem(.adaptive(minimum: 300, maximum: 520), spacing: 12)]
+    }
+
+    private var savedRows: [ProfileRow] {
+        store.rows.filter { !$0.isCurrentAuth }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "person.2.badge.plus")
+                .font(.system(size: 30))
+                .foregroundStyle(store.themeMode.accent)
+            Text("No saved profiles")
+                .font(.system(size: 17, weight: .semibold))
+            Text("Add an account to create a safe, restart-based profile switch.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("Add Account") {
+                store.addAccountWithCodexLogin()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(store.isWorking)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(24)
     }
 
     private var activeProfileDisplay: String {
@@ -3347,12 +3519,19 @@ private struct ManagerDashboardView: View {
         return store.activeProfile.isEmpty ? "None" : store.activeProfile
     }
 
+    private var activeStateDisplay: String {
+        if let active = store.rows.first(where: { $0.id == store.activeStateProfile }) {
+            return active.displayName
+        }
+        return store.activeStateProfile.isEmpty ? "None" : store.activeStateProfile
+    }
+
     private var messageColor: Color {
         let lower = store.message.lowercased()
         if lower.contains("failed") || lower.contains("error") || lower.contains("khong") || lower.contains("cannot") {
             return .red
         }
-        if lower.contains("saved") || lower.contains("captured") || lower.contains("switched") || lower.contains("copied") || lower.contains("added") {
+        if lower.contains("saved") || lower.contains("captured") || lower.contains("switched") || lower.contains("active profile") || lower.contains("copied") || lower.contains("added") {
             return .green
         }
         return .secondary
@@ -3375,8 +3554,16 @@ private struct ManagerDashboardView: View {
         store.loadSelected()
     }
 
-    private func canUse(_ row: ProfileRow) -> Bool {
-        !store.isWorking && !row.isCurrentAuth && !row.isActive
+    private func canMakeActive(_ row: ProfileRow) -> Bool {
+        !store.isWorking && !row.isCurrentAuth && !row.isActive && !row.identityMismatch
+    }
+
+    private func canMakeState(_ row: ProfileRow) -> Bool {
+        !store.isWorking && !row.isCurrentAuth && row.hasMachineState && !row.isMachineStateActive && !row.identityMismatch
+    }
+
+    private func canUpdateAuth(_ row: ProfileRow) -> Bool {
+        !store.isWorking && !row.isCurrentAuth && !row.identityMismatch
     }
 
     private func confirmDelete() {
@@ -3394,16 +3581,22 @@ private struct ManagerDashboardView: View {
 
 private struct AccountQuotaCard: View {
     let row: ProfileRow
+    @ObservedObject var store: AccountStore
     let snapshot: CodexUsageSnapshot
     let isSelected: Bool
     let privacyMode: Bool
-    let canUse: Bool
-    let useAction: () -> Void
+    let canMakeActive: Bool
+    let canUpdateAuth: Bool
+    let canMakeState: Bool
+    let makeActiveAction: () -> Void
+    let reauthenticateAction: () -> Void
+    let updateAuthAction: () -> Void
+    let makeStateAction: () -> Void
     let refreshAction: () -> Void
     let deleteAction: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
@@ -3414,15 +3607,56 @@ private struct AccountQuotaCard: View {
                                 .shadow(color: Color.green.opacity(0.45), radius: 6)
                         }
 
-                        Text(row.displayName)
-                            .font(.system(size: 17, weight: .bold))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                        if store.isEditingNickname && store.selectedID == row.id {
+                            TextField("Account nickname", text: $store.nicknameDraft)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 180)
+                                .onSubmit {
+                                    store.saveNickname()
+                                }
+
+                            Button {
+                                store.saveNickname()
+                            } label: {
+                                Image(systemName: "checkmark.circle.fill")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.green)
+                            .disabled(store.isWorking)
+
+                            Button {
+                                store.cancelNicknameEdit()
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                        } else {
+                            Text(row.displayName)
+                                .font(.system(size: 16, weight: .bold))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+
+                            if !row.isCurrentAuth {
+                                Button {
+                                    store.selectedID = row.id
+                                    store.loadSelected()
+                                    store.nicknameDraft = store.selectedMetadata.nickname
+                                    store.isEditingNickname = true
+                                } label: {
+                                    Image(systemName: "pencil")
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                                .disabled(row.identityMismatch)
+                                .help(row.identityMismatch ? "Repair the account mismatch before editing this nickname" : "Set account nickname")
+                            }
+                        }
 
                         PlanBadge(text: planText)
                     }
 
-                    Text(row.isCurrentAuth ? "Machine default" : masked(row.subtitle))
+                    Text(row.isCurrentAuth ? "Live auth file" : masked(row.subtitle))
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -3431,34 +3665,87 @@ private struct AccountQuotaCard: View {
 
                 Spacer(minLength: 8)
 
-                StatusChip(text: row.isActive ? "In use" : row.health.title, color: row.isActive ? .green : healthColor, systemImage: nil)
+                VStack(alignment: .trailing, spacing: 5) {
+                    if row.identityMismatch {
+                        StatusChip(text: "Identity Mismatch", color: .red, systemImage: "exclamationmark.triangle.fill")
+                    }
+                    if row.isActive {
+                        StatusChip(text: "Active Profile", color: .green, systemImage: "checkmark.circle.fill")
+                    }
+                    if row.isMachineStateActive {
+                        StatusChip(text: "Current State", color: .blue, systemImage: "macwindow")
+                    }
+                    if !row.isActive && !row.isMachineStateActive && !row.identityMismatch {
+                        StatusChip(text: row.health.title, color: healthColor, systemImage: nil)
+                    }
+                }
             }
 
-            VStack(spacing: 13) {
+            VStack(spacing: 8) {
                 CardQuotaLine(title: "5-hour limit", limit: snapshot.primaryLimit, color: .green)
                 CardQuotaLine(title: "Weekly limit", limit: snapshot.secondaryLimit, color: .green)
             }
 
-            HStack(spacing: 10) {
-                Button(action: useAction) {
-                    Label("Use", systemImage: "arrow.counterclockwise")
-                        .frame(minWidth: 68)
+            HStack(spacing: 8) {
+                Button(action: makeActiveAction) {
+                    Label(activeProfileActionTitle, systemImage: activeProfileActionIcon)
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(CardActionButtonStyle(color: .secondary))
-                .disabled(!canUse)
+                .disabled(!canMakeActive)
 
+                Button(action: reauthenticateAction) {
+                    Label("Re-authenticate", systemImage: "person.badge.key.fill")
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(CardActionButtonStyle(color: .orange))
+                .disabled(row.isCurrentAuth || store.isWorking)
+                .help("Log in again and replace only this profile's validated auth token.")
+            }
+
+            HStack(spacing: 8) {
+                Button(action: updateAuthAction) {
+                    Label("Update Auth Token", systemImage: "key.fill")
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(CardActionButtonStyle(color: .orange))
+                .disabled(!canUpdateAuth)
+                .help("Save the current live auth into this profile only when its identity matches.")
+
+                if canMakeState {
+                    Button(action: makeStateAction) {
+                        Label("Use This State", systemImage: "macwindow")
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(CardActionButtonStyle(color: .blue))
+                    .help("Restart Codex and make this profile's saved Desktop state current.")
+                } else {
+                    Label(
+                        row.isMachineStateActive ? "Current State" : "No Saved State",
+                        systemImage: row.isMachineStateActive ? "checkmark.circle.fill" : "questionmark.circle"
+                    )
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(row.isMachineStateActive ? Color.blue : Color.secondary)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+
+            HStack(spacing: 10) {
                 Spacer()
 
                 IconGlassButton(systemImage: "arrow.clockwise", color: .secondary, action: refreshAction)
 
                 if !row.isCurrentAuth {
                     IconGlassButton(systemImage: "trash", color: .red, action: deleteAction)
-                        .disabled(row.isActive)
+                        .disabled(row.isActive || row.isMachineStateActive)
                 }
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 196, alignment: .topLeading)
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
         .background {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(.ultraThinMaterial)
@@ -3489,6 +3776,32 @@ private struct AccountQuotaCard: View {
         case .error: return .red
         case .unknown: return .secondary
         }
+    }
+
+    private var activeProfileActionTitle: String {
+        if row.isCurrentAuth { return "Current Auth File" }
+        if row.identityMismatch { return "Re-authenticate First" }
+        if row.isActive { return "Active Profile" }
+        return "Make Active Profile"
+    }
+
+    private var activeProfileActionIcon: String {
+        if row.identityMismatch { return "person.badge.key.fill" }
+        if row.isCurrentAuth || row.isActive { return "checkmark.circle.fill" }
+        return "desktopcomputer"
+    }
+
+    private var machineStateActionTitle: String {
+        if row.isCurrentAuth { return "Current Auth File" }
+        if !row.hasMachineState { return "No Saved State" }
+        if row.isMachineStateActive { return "Current State" }
+        return "Use This State"
+    }
+
+    private var machineStateActionIcon: String {
+        if row.isCurrentAuth || row.isMachineStateActive { return "checkmark.circle.fill" }
+        if !row.hasMachineState { return "questionmark.circle" }
+        return "macwindow"
     }
 
     private func masked(_ value: String) -> String {
@@ -3673,6 +3986,7 @@ private struct MenuBarSwitcherView: View {
     let openManager: () -> Void
     let refresh: () -> Void
     let switchProfile: () -> Void
+    let makeState: () -> Void
     let quit: () -> Void
 
     var body: some View {
@@ -3821,14 +4135,25 @@ private struct MenuBarSwitcherView: View {
     }
 
     private var switchButton: some View {
-        Button(action: switchProfile) {
-            Label(switchTitle, systemImage: "arrow.triangle.2.circlepath")
-                .font(.system(size: 13, weight: .semibold))
-                .frame(maxWidth: .infinity)
+        HStack(spacing: 8) {
+            Button(action: switchProfile) {
+                Label(switchTitle, systemImage: "desktopcomputer")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!canSwitch)
+
+            Button(action: makeState) {
+                Label(stateTitle, systemImage: "macwindow")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(!canMakeState)
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-        .disabled(!canSwitch)
     }
 
     private var emptyState: some View {
@@ -3868,20 +4193,37 @@ private struct MenuBarSwitcherView: View {
     }
 
     private var activeText: String {
-        if let active = savedRows.first(where: { $0.id == store.activeProfile }) {
-            return "Active: \(active.displayName)"
+        let defaultName = savedRows.first(where: { $0.id == store.activeProfile })?.displayName ?? "None"
+        let stateName = savedRows.first(where: { $0.id == store.activeStateProfile })?.displayName ?? "None"
+        if defaultName == stateName {
+            return "Active & state: \(defaultName)"
         }
-        return "No active account"
+        return "Active: \(defaultName) • State: \(stateName)"
     }
 
     private var switchTitle: String {
-        guard let selectedRow else { return "Switch" }
-        return selectedRow.isActive ? "Already Active" : "Switch to \(selectedRow.displayName)"
+        guard let selectedRow else { return "Make Active Profile" }
+        if selectedRow.identityMismatch { return "Re-authenticate Profile" }
+        return selectedRow.isActive ? "Already Active" : "Make \(selectedRow.displayName) Active"
+    }
+
+    private var stateTitle: String {
+        guard let selectedRow else { return "Make Current State" }
+        if !selectedRow.hasMachineState { return "No Saved State" }
+        return selectedRow.isMachineStateActive ? "Already Current State" : "Make Current State"
     }
 
     private var canSwitch: Bool {
         guard let selectedRow else { return false }
+        if selectedRow.identityMismatch {
+            return !store.isWorking
+        }
         return !store.isWorking && !selectedRow.isActive
+    }
+
+    private var canMakeState: Bool {
+        guard let selectedRow else { return false }
+        return !store.isWorking && selectedRow.hasMachineState && !selectedRow.isMachineStateActive && !selectedRow.identityMismatch
     }
 
     private var usageProfileID: String {
@@ -3909,7 +4251,7 @@ private struct MenuBarSwitcherView: View {
         if lower.contains("failed") || lower.contains("error") || lower.contains("cannot") {
             return .red
         }
-        if lower.contains("saved") || lower.contains("captured") || lower.contains("switched") || lower.contains("copied") {
+        if lower.contains("saved") || lower.contains("captured") || lower.contains("switched") || lower.contains("active profile") || lower.contains("copied") {
             return .green
         }
         return .secondary
@@ -4038,7 +4380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         debugLog("applicationDidFinishLaunching")
-        ProcessInfo.processInfo.disableAutomaticTermination("Codex Account Switcher stays available from the menu bar.")
+        ProcessInfo.processInfo.disableAutomaticTermination("Codex Account Manager: Clanked Edition stays available from the menu bar.")
         NSApp.setActivationPolicy(.regular)
         setupStatusItem()
         setupStatusPopover()
@@ -4064,7 +4406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if let button = item.button {
             if let image = Bundle.main.image(forResource: "StatusIcon") {
                 image.size = NSSize(width: 16, height: 16)
-                image.isTemplate = true
+                image.isTemplate = false
                 button.image = image
             }
             button.title = " Codex"
@@ -4094,6 +4436,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 switchProfile: { [weak self] in
                     self?.switchSelectedMenuBarProfile()
                 },
+                makeState: { [weak self] in
+                    self?.makeSelectedMenuBarState()
+                },
                 quit: { [weak self] in
                     self?.closeStatusPopover()
                     self?.quit()
@@ -4109,7 +4454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let appMenu = NSMenu()
         appMenu.addItem(NSMenuItem(title: "Open Manager", action: #selector(openManager), keyEquivalent: "o"))
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(NSMenuItem(title: "Quit Codex Account Switcher", action: #selector(quit), keyEquivalent: "q"))
+        appMenu.addItem(NSMenuItem(title: "Quit Codex Account Manager: Clanked Edition", action: #selector(quit), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
@@ -4132,7 +4477,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 menuBarState.selectedProfileID = savedRows.first?.id ?? ""
             }
         }
-        statusItem?.button?.toolTip = store.activeProfile.isEmpty ? "Codex Accounts" : "Active: \(store.activeProfile)"
+        statusItem?.button?.toolTip = store.activeProfile.isEmpty ? "Codex Accounts" : "Active profile: \(store.activeProfile)"
     }
 
     @objc private func openManager() {
@@ -4155,12 +4500,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if window == nil {
             let controller = NSHostingController(rootView: ManagerDashboardView(store: store))
             let newWindow = NSWindow(contentViewController: controller)
-            newWindow.title = "Codex Account Manager"
+            newWindow.title = "Codex Account Manager: Clanked Edition"
             newWindow.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             newWindow.isReleasedWhenClosed = false
             newWindow.collectionBehavior = [.moveToActiveSpace]
             newWindow.level = .floating
-            newWindow.minSize = NSSize(width: 1120, height: 640)
+            newWindow.minSize = NSSize(width: 520, height: 420)
             let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 80, y: 80, width: 1200, height: 800)
             let frame = NSRect(
                 x: visibleFrame.midX - 540,
@@ -4187,7 +4532,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard !profile.isEmpty, profile != store.activeProfile else { return }
         store.selectedID = profile
         store.loadSelected()
-        store.switchSelected()
+        store.makeActiveProfile()
+    }
+
+    private func makeSelectedMenuBarState() {
+        let profile = menuBarState.selectedProfileID
+        guard !profile.isEmpty, profile != store.activeStateProfile else { return }
+        store.selectedID = profile
+        store.loadSelected()
+        store.makeCurrentMachineState()
     }
 
     private func closeStatusPopover() {
@@ -4233,8 +4586,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.run()
+@main
+private enum CodexAccountSwitcherMain {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.regular)
+        app.run()
+    }
+}
