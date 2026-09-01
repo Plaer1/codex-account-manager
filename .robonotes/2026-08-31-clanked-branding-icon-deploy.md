@@ -19,3 +19,6 @@
 - Asset source: user-provided eye image plus the existing `resources/StatusIcon.png` reference.
 - Build output: `build/Codex Account Manager Clanked Edition.app`.
 - Auth/profile state was not read or modified as part of the branding/icon work.
+- GitHub fork: `https://github.com/Plaer1/codex-account-manager`.
+- Published commit: `96de4ad` (`Brand as Clanked Edition and add eye cloud icon`).
+- Redeployed process verified at `build/Codex Account Manager Clanked Edition.app/Contents/MacOS/CodexAccountSwitcher`.
