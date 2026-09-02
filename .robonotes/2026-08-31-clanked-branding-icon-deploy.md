@@ -34,3 +34,8 @@
 
 - The profile-row tint now ignores context-window consumption and uses only the 5-hour and 7-day quota windows.
 - This prevents a stale or oversized local context token count from turning a profile red when the actual quota fields show `No data`.
+
+## Menu/main usage parity correction
+
+- The menu-bar refresh path previously reloaded profile rows with `refreshUsage: false`, leaving its weekly values stale while the main manager refreshed usage.
+- Menu-bar open/refresh now calls the same asynchronous per-profile usage refresh as the main app.

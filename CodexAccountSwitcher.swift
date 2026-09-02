@@ -4501,7 +4501,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func refreshMenuBarAccounts() {
-        store.reload(refreshUsage: false)
+        store.reload(refreshUsage: true)
         let savedRows = store.rows.filter { !$0.isCurrentAuth }
         let selectedIsValid = savedRows.contains { $0.id == menuBarState.selectedProfileID }
         if !selectedIsValid {
