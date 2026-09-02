@@ -29,3 +29,8 @@
 - The generator preview represented transparency with a checkerboard but saved the first result as RGB; this was detected before deployment.
 - Converted the checkerboard exterior to actual alpha, verified `hasAlpha: yes`, and rebuilt both the `.icns` and 56px status icon from the RGBA source.
 - Cleaned the remaining light fringe around the cloud and arrows, then verified the corrected RGBA candidate visually before the 1.0 packaging pass.
+
+## Usage tint correction
+
+- The profile-row tint now ignores context-window consumption and uses only the 5-hour and 7-day quota windows.
+- This prevents a stale or oversized local context token count from turning a profile red when the actual quota fields show `No data`.

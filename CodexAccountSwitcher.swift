@@ -124,15 +124,8 @@ struct CodexUsageSnapshot: Codable {
         return max(0, min(100, 100 - (Double(contextUsed) / Double(contextWindow) * 100)))
     }
 
-    var maximumExhaustionPercent: Double? {
-        guard updatedAt != nil || observedAt != nil || primaryLimit != nil || secondaryLimit != nil else {
-            return nil
-        }
-
+    var maximumQuotaExhaustionPercent: Double? {
         var values: [Double] = []
-        if contextWindow > 0 {
-            values.append(100 - contextLeftPercent)
-        }
         if let primaryLimit {
             values.append(100 - primaryLimit.leftPercent)
         }
@@ -4276,7 +4269,7 @@ private struct MenuBarSwitcherView: View {
 
     private func usageTint(for row: ProfileRow) -> Color {
         guard !row.isActive else { return .clear }
-        guard let exhaustionPercent = store.usageSnapshot(for: row.id).maximumExhaustionPercent else {
+        guard let exhaustionPercent = store.usageSnapshot(for: row.id).maximumQuotaExhaustionPercent else {
             return Color.white.opacity(0.04)
         }
 
