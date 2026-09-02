@@ -43,7 +43,7 @@ This fork builds on the [original Codex Account Manager](https://github.com/ngnt
 - **Separate desktop state:** the current Codex Desktop state can be changed independently from the active auth profile.
 - **Recovery controls:** a profile can be re-authenticated and its saved auth token updated after a login flow.
 - **Nicknames and compact UI:** profiles support friendly labels, and the menu-bar account picker keeps the most useful controls in a compact layout.
-- **Usage heat shading:** inactive profiles are refreshed from their saved usage data and shaded from grey through red by the highest observed context, 5-hour, or 7-day usage; missing usage data stays neutral grey.
+- **Usage heat shading:** inactive profiles are refreshed from their saved usage data and shaded from grey through red by the highest observed exhaustion across context, 5-hour, or 7-day usage. Grey means 0% consumed/100% remaining; red means 100% consumed/0% remaining. Missing usage data stays neutral grey.
 - **Clanked branding:** the app is branded **Codex Account Manager: Clanked Edition** and uses a transparent eye-cloud icon with refresh arrows.
 
 ## Screenshots
