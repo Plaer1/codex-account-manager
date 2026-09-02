@@ -46,3 +46,5 @@
 - Reused the main profile-card `QuotaLimitRow` for the taskbar's 5-hour and 7-day rows, so both surfaces render the same `UsageLimitWindow.usedPercent` values and reset data.
 - Removed the taskbar-only `MenuBarUsageMeterRow` implementation, which had displayed the inverse “percent left” value and caused the taskbar to disagree with the main app.
 - Removed hover-driven taskbar usage selection and `MenuBarState`; taskbar selection now uses the shared `AccountStore.selectedID`, the same selection used by the main manager.
+- Restored row hover as a preview-only interaction: hovering a taskbar profile temporarily shows that profile's shared 5-hour/7-day snapshot without changing the selected profile or live auth.
+- Taskbar heat shading now follows only 5-hour exhaustion; a 7-day window at 100% still forces the row fully red. The preview exposes the exact remaining percentage as `N% left`.

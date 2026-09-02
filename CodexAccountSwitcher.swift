@@ -3883,7 +3883,7 @@ private struct QuotaLimitRow: View {
             .frame(height: 9)
 
             VStack(alignment: .trailing, spacing: 1) {
-                Text(percentText)
+                Text(compactPercentText)
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(limit == nil ? .secondary : levelColor)
                 Text(compactResetText)
@@ -3912,6 +3912,11 @@ private struct QuotaLimitRow: View {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: resetAt, relativeTo: Date())
+    }
+
+    private var compactPercentText: String {
+        guard let limit else { return "--" }
+        return "\(Int(limit.leftPercent.rounded()))% left"
     }
 
     private var levelColor: Color {
@@ -4041,6 +4046,7 @@ private struct CardActionButtonStyle: ButtonStyle {
 
 private struct MenuBarSwitcherView: View {
     @ObservedObject var store: AccountStore
+    @State private var hoveredProfileID: String?
 
     let openManager: () -> Void
     let refresh: () -> Void
@@ -4189,6 +4195,9 @@ private struct MenuBarSwitcherView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
+                    .onHover { isHovering in
+                        hoveredProfileID = isHovering ? row.id : nil
+                    }
                 }
             }
         }
@@ -4288,6 +4297,9 @@ private struct MenuBarSwitcherView: View {
     }
 
     private var usageProfileID: String {
+        if let hoveredProfileID {
+            return hoveredProfileID
+        }
         if savedRows.contains(where: { $0.id == store.selectedID }) {
             return store.selectedID
         }
@@ -4306,10 +4318,13 @@ private struct MenuBarSwitcherView: View {
 
     private func usageTint(for row: ProfileRow) -> Color {
         guard !row.isActive else { return .clear }
-        guard let exhaustionPercent = store.usageSnapshot(for: row.id).maximumQuotaExhaustionPercent else {
+        let snapshot = store.usageSnapshot(for: row.id)
+        let weeklyExpired = (snapshot.secondaryLimit?.usedPercent ?? 0) >= 100
+        guard let fiveHourExhaustion = snapshot.primaryLimit?.usedPercent ?? (weeklyExpired ? 100 : nil) else {
             return Color.white.opacity(0.04)
         }
 
+        let exhaustionPercent = weeklyExpired ? 100 : fiveHourExhaustion
         let progress = max(0, min(1, exhaustionPercent / 100))
         let red = 0.36 + (0.56 * progress)
         let green = 0.36 - (0.26 * progress)
