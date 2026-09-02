@@ -45,6 +45,7 @@ This fork builds on the [original Codex Account Manager](https://github.com/ngnt
 - **Nicknames and compact UI:** profiles support friendly labels, and the menu-bar account picker keeps the most useful controls in a compact layout.
 - **Usage heat shading:** inactive profiles are refreshed from their saved quota data and shaded from grey through red by the highest observed exhaustion across the 5-hour or 7-day limits. The separate context-window meter does not affect this tint. Grey means 0% consumed/100% remaining; red means 100% consumed/0% remaining. Missing quota data stays neutral grey.
 - **Consistent usage refresh:** opening or refreshing the menu-bar picker refreshes the same per-profile quota snapshots used by the main manager.
+- **One usage source:** the taskbar shows the same consumed-percent 5-hour and 7-day quota windows as the main profile cards; its separate context-window meter has been removed.
 - **Clanked branding:** the app is branded **Codex Account Manager: Clanked Edition** and uses a transparent eye-cloud icon with refresh arrows.
 
 ## Screenshots

@@ -3362,11 +3362,6 @@ private struct SecondaryActionButtonStyle: ButtonStyle {
     }
 }
 
-final class MenuBarState: ObservableObject {
-    @Published var selectedProfileID: String = ""
-    @Published var hoveredProfileID: String?
-}
-
 private struct ManagerDashboardView: View {
     @ObservedObject var store: AccountStore
 
@@ -3699,8 +3694,8 @@ private struct AccountQuotaCard: View {
             }
 
             VStack(spacing: 8) {
-                CardQuotaLine(title: "5-hour limit", limit: snapshot.primaryLimit, color: .green)
-                CardQuotaLine(title: "Weekly limit", limit: snapshot.secondaryLimit, color: .green)
+                QuotaLimitRow(title: "5-hour limit", limit: snapshot.primaryLimit, color: .green, compact: false)
+                QuotaLimitRow(title: "Weekly limit", limit: snapshot.secondaryLimit, color: .green, compact: false)
             }
 
             HStack(spacing: 8) {
@@ -3833,12 +3828,21 @@ private struct AccountQuotaCard: View {
     }
 }
 
-private struct CardQuotaLine: View {
+private struct QuotaLimitRow: View {
     let title: String
     let limit: UsageLimitWindow?
     let color: Color
+    let compact: Bool
 
     var body: some View {
+        if compact {
+            compactBody
+        } else {
+            cardBody
+        }
+    }
+
+    private var cardBody: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
                 Text(title)
@@ -3859,6 +3863,38 @@ private struct CardQuotaLine: View {
         }
     }
 
+    private var compactBody: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 46, alignment: .leading)
+
+            GeometryReader { proxy in
+                let progress = max(0, min(1, (limit?.usedPercent ?? 0) / 100))
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color(nsColor: .separatorColor).opacity(0.32))
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(limit == nil ? Color.secondary.opacity(0.25) : levelColor.opacity(0.78))
+                        .frame(width: proxy.size.width * progress)
+                }
+            }
+            .frame(height: 9)
+
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(percentText)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(limit == nil ? .secondary : levelColor)
+                Text(compactResetText)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 76, alignment: .trailing)
+        }
+    }
+
     private var percentText: String {
         guard let limit else { return "--" }
         return "\(Int(limit.usedPercent.rounded()))%"
@@ -3869,6 +3905,13 @@ private struct CardQuotaLine: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "MM/dd, HH:mm"
         return formatter.string(from: resetAt)
+    }
+
+    private var compactResetText: String {
+        guard let limit, let resetAt = limit.resetAt else { return "No data" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: resetAt, relativeTo: Date())
     }
 
     private var levelColor: Color {
@@ -3998,7 +4041,6 @@ private struct CardActionButtonStyle: ButtonStyle {
 
 private struct MenuBarSwitcherView: View {
     @ObservedObject var store: AccountStore
-    @ObservedObject var state: MenuBarState
 
     let openManager: () -> Void
     let refresh: () -> Void
@@ -4089,11 +4131,12 @@ private struct MenuBarSwitcherView: View {
             LazyVStack(spacing: 6) {
                 ForEach(savedRows) { row in
                     Button {
-                        state.selectedProfileID = row.id
+                        store.selectedID = row.id
+                        store.loadSelected()
                     } label: {
                         HStack(spacing: 9) {
-                            Image(systemName: row.id == state.selectedProfileID ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(row.id == state.selectedProfileID ? Color.accentColor : .secondary)
+                            Image(systemName: row.id == store.selectedID ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(row.id == store.selectedID ? Color.accentColor : .secondary)
                                 .frame(width: 18)
 
                             VStack(alignment: .leading, spacing: 2) {
@@ -4136,19 +4179,16 @@ private struct MenuBarSwitcherView: View {
                                 )
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(row.id == state.selectedProfileID ? Color.accentColor.opacity(0.18) : .clear)
+                                        .fill(row.id == store.selectedID ? Color.accentColor.opacity(0.18) : .clear)
                                 )
                         }
                         .overlay(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(row.id == state.selectedProfileID ? Color.accentColor.opacity(0.55) : Color.white.opacity(0.12), lineWidth: 1)
+                                .stroke(row.id == store.selectedID ? Color.accentColor.opacity(0.55) : Color.white.opacity(0.12), lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .onHover { isHovering in
-                        state.hoveredProfileID = isHovering ? row.id : nil
-                    }
                 }
             }
         }
@@ -4210,7 +4250,7 @@ private struct MenuBarSwitcherView: View {
     }
 
     private var selectedRow: ProfileRow? {
-        savedRows.first { $0.id == state.selectedProfileID }
+        savedRows.first { $0.id == store.selectedID }
     }
 
     private var activeText: String {
@@ -4248,11 +4288,8 @@ private struct MenuBarSwitcherView: View {
     }
 
     private var usageProfileID: String {
-        if let hoveredProfileID = state.hoveredProfileID {
-            return hoveredProfileID
-        }
-        if !state.selectedProfileID.isEmpty {
-            return state.selectedProfileID
+        if savedRows.contains(where: { $0.id == store.selectedID }) {
+            return store.selectedID
         }
         if !store.activeProfile.isEmpty {
             return store.activeProfile
@@ -4320,92 +4357,16 @@ private struct MenuBarUsageView: View {
                     .truncationMode(.tail)
             }
 
-            MenuBarUsageMeterRow(
-                title: "Context",
-                leftPercent: snapshot.contextLeftPercent,
-                detail: "\(compactNumber(snapshot.contextUsed))/\(compactNumber(snapshot.contextWindow))"
-            )
-
-            MenuBarUsageMeterRow(
-                title: "5h",
-                leftPercent: snapshot.primaryLimit?.leftPercent,
-                detail: resetText(for: snapshot.primaryLimit)
-            )
-
-            MenuBarUsageMeterRow(
-                title: "7d",
-                leftPercent: snapshot.secondaryLimit?.leftPercent,
-                detail: resetText(for: snapshot.secondaryLimit)
-            )
+            QuotaLimitRow(title: "5h", limit: snapshot.primaryLimit, color: .green, compact: true)
+            QuotaLimitRow(title: "7d", limit: snapshot.secondaryLimit, color: .green, compact: true)
         }
         .padding(10)
         .liquidGlass(cornerRadius: 8, tint: Color.accentColor)
-    }
-
-    private func resetText(for limit: UsageLimitWindow?) -> String {
-        guard let limit, let resetAt = limit.resetAt else { return "No data" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: resetAt, relativeTo: Date())
-    }
-
-    private func compactNumber(_ value: Int) -> String {
-        if value >= 1_000_000 {
-            return "\(value / 1_000_000)M"
-        }
-        if value >= 1000 {
-            return "\(value / 1000)K"
-        }
-        return "\(value)"
-    }
-}
-
-private struct MenuBarUsageMeterRow: View {
-    let title: String
-    let leftPercent: Double?
-    let detail: String
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(title)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 46, alignment: .leading)
-
-            GeometryReader { proxy in
-                let progress = max(0, min(1, (leftPercent ?? 0) / 100))
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color(nsColor: .separatorColor).opacity(0.32))
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(leftPercent == nil ? Color.secondary.opacity(0.25) : Color.accentColor.opacity(0.78))
-                        .frame(width: proxy.size.width * progress)
-                }
-            }
-            .frame(height: 9)
-
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(leftText)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(leftPercent == nil ? .secondary : .primary)
-                Text(detail)
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .frame(width: 76, alignment: .trailing)
-        }
-    }
-
-    private var leftText: String {
-        guard let leftPercent else { return "--%" }
-        return "\(Int(leftPercent.rounded()))%"
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let store = AccountStore()
-    private let menuBarState = MenuBarState()
     private var statusItem: NSStatusItem?
     private var statusPopover: NSPopover?
     private var localEventMonitor: Any?
@@ -4459,7 +4420,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.contentViewController = NSHostingController(
             rootView: MenuBarSwitcherView(
                 store: store,
-                state: menuBarState,
                 openManager: { [weak self] in
                     self?.closeStatusPopover()
                     self?.showManager()
@@ -4503,13 +4463,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func refreshMenuBarAccounts() {
         store.reload(refreshUsage: true)
         let savedRows = store.rows.filter { !$0.isCurrentAuth }
-        let selectedIsValid = savedRows.contains { $0.id == menuBarState.selectedProfileID }
+        let selectedIsValid = savedRows.contains { $0.id == store.selectedID }
         if !selectedIsValid {
-            if savedRows.contains(where: { $0.id == store.activeProfile }) {
-                menuBarState.selectedProfileID = store.activeProfile
+            if let active = savedRows.first(where: { $0.id == store.activeProfile }) {
+                store.selectedID = active.id
             } else {
-                menuBarState.selectedProfileID = savedRows.first?.id ?? ""
+                store.selectedID = savedRows.first?.id ?? ""
             }
+            store.loadSelected()
         }
         statusItem?.button?.toolTip = store.activeProfile.isEmpty ? "Codex Accounts" : "Active profile: \(store.activeProfile)"
     }
@@ -4562,7 +4523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func switchSelectedMenuBarProfile() {
-        let profile = menuBarState.selectedProfileID
+        let profile = store.selectedID
         guard !profile.isEmpty, profile != store.activeProfile else { return }
         store.selectedID = profile
         store.loadSelected()
@@ -4570,7 +4531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func makeSelectedMenuBarState() {
-        let profile = menuBarState.selectedProfileID
+        let profile = store.selectedID
         guard !profile.isEmpty, profile != store.activeStateProfile else { return }
         store.selectedID = profile
         store.loadSelected()

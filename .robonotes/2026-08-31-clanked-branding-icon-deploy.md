@@ -39,3 +39,10 @@
 
 - The menu-bar refresh path previously reloaded profile rows with `refreshUsage: false`, leaving its weekly values stale while the main manager refreshed usage.
 - Menu-bar open/refresh now calls the same asynchronous per-profile usage refresh as the main app.
+
+## Taskbar usage/source-of-truth cleanup
+
+- Removed the taskbar's separate context-window meter and its context-number formatting helpers.
+- Reused the main profile-card `QuotaLimitRow` for the taskbar's 5-hour and 7-day rows, so both surfaces render the same `UsageLimitWindow.usedPercent` values and reset data.
+- Removed the taskbar-only `MenuBarUsageMeterRow` implementation, which had displayed the inverse “percent left” value and caused the taskbar to disagree with the main app.
+- Removed hover-driven taskbar usage selection and `MenuBarState`; taskbar selection now uses the shared `AccountStore.selectedID`, the same selection used by the main manager.
