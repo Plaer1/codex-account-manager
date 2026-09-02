@@ -123,6 +123,25 @@ struct CodexUsageSnapshot: Codable {
         guard contextWindow > 0 else { return 0 }
         return max(0, min(100, 100 - (Double(contextUsed) / Double(contextWindow) * 100)))
     }
+
+    var maximumUsedPercent: Double? {
+        guard updatedAt != nil || observedAt != nil || primaryLimit != nil || secondaryLimit != nil else {
+            return nil
+        }
+
+        var values: [Double] = []
+        if contextWindow > 0 {
+            values.append(Double(contextUsed) / Double(contextWindow) * 100)
+        }
+        if let primaryLimit {
+            values.append(primaryLimit.usedPercent)
+        }
+        if let secondaryLimit {
+            values.append(secondaryLimit.usedPercent)
+        }
+        guard let maximum = values.max() else { return nil }
+        return max(0, min(100, maximum))
+    }
 }
 
 private struct RateLimitSnapshot {
@@ -374,7 +393,12 @@ final class AccountStore: ObservableObject {
         guard !isRefreshingUsage else { return }
         isRefreshingUsage = true
         let activeID = activeProfile.isEmpty ? currentSelection : activeProfile
-        let profileIDs = rows.filter { $0.id == activeID && !$0.identityMismatch }.map(\.id)
+        var profileIDs = rows
+            .filter { !$0.isCurrentAuth && !$0.identityMismatch }
+            .map(\.id)
+        if !activeID.isEmpty && !profileIDs.contains(activeID) {
+            profileIDs.append(activeID)
+        }
         DispatchQueue.global(qos: .utility).async {
             var snapshots: [String: CodexUsageSnapshot] = [:]
             for profileID in profileIDs {
@@ -4115,7 +4139,11 @@ private struct MenuBarSwitcherView: View {
                                 .fill(.ultraThinMaterial)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(row.id == state.selectedProfileID ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.04))
+                                        .fill(self.usageTint(for: row))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(row.id == state.selectedProfileID ? Color.accentColor.opacity(0.18) : .clear)
                                 )
                         }
                         .overlay(
@@ -4244,6 +4272,19 @@ private struct MenuBarSwitcherView: View {
             return row.displayName
         }
         return usageProfileID == currentSelection ? "Current Codex" : usageProfileID
+    }
+
+    private func usageTint(for row: ProfileRow) -> Color {
+        guard !row.isActive else { return .clear }
+        guard let usedPercent = store.usageSnapshot(for: row.id).maximumUsedPercent else {
+            return Color.white.opacity(0.04)
+        }
+
+        let progress = max(0, min(1, usedPercent / 100))
+        let red = 0.36 + (0.56 * progress)
+        let green = 0.36 - (0.26 * progress)
+        let blue = 0.38 - (0.28 * progress)
+        return Color(red: red, green: green, blue: blue).opacity(0.28)
     }
 
     private var messageColor: Color {

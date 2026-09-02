@@ -21,6 +21,7 @@ The project is designed for people who regularly move between personal, work, te
 - Review token status for access, refresh, and ID tokens without revealing token values.
 - Update a saved profile's token explicitly after re-authentication, with account-identity checks.
 - Bind each profile and nickname to the original signed-in user so shared Team account IDs cannot mix labels or tokens.
+- Shade inactive menu-bar profiles from neutral grey to red using their highest observed context, 5-hour, or 7-day usage.
 - Run fully locally. No token or profile data is uploaded anywhere.
 
 ## What Is New
@@ -32,6 +33,28 @@ The latest UI refresh adds a clearer account-management view inspired by operati
 - The account workflow now includes auth import, local profile backup export, and faster menu bar actions inspired by tray-first account switchers.
 - Token parsing is more tolerant of Codex auth format changes, including both snake_case and camelCase token keys.
 - Saved nicknames are preserved when an existing profile is captured again.
+
+## Clanked Edition Changes From the Original
+
+This fork builds on the [original Codex Account Manager](https://github.com/ngnthanhdev/codex-account-manager) with a few opinionated account-switching improvements:
+
+- **Safer profile identity:** profiles retain the original signed-in user identity, preventing shared Team account IDs from making labels or tokens bleed between accounts.
+- **Explicit active-profile switching:** **Make Active Profile** updates the live auth file and restarts Codex so the selected account is actually live.
+- **Separate desktop state:** the current Codex Desktop state can be changed independently from the active auth profile.
+- **Recovery controls:** a profile can be re-authenticated and its saved auth token updated after a login flow.
+- **Nicknames and compact UI:** profiles support friendly labels, and the menu-bar account picker keeps the most useful controls in a compact layout.
+- **Usage heat shading:** inactive profiles are refreshed from their saved usage data and shaded from grey through red by the highest observed context, 5-hour, or 7-day usage; missing usage data stays neutral grey.
+- **Clanked branding:** the app is branded **Codex Account Manager: Clanked Edition** and uses a transparent eye-cloud icon with refresh arrows.
+
+## Screenshots
+
+The compact menu-bar picker surfaces current usage and account switching without requiring the full manager window:
+
+![Codex Account Manager menu-bar usage picker](docs/screenshots/menu-bar-usage.png)
+
+The app icon combines the Codex cloud, the supplied eye artwork, and the refresh arrows:
+
+![Codex Account Manager Clanked Edition eye-cloud icon](resources/AppIconClanked.png)
 
 ## Requirements
 
