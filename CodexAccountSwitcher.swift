@@ -961,12 +961,19 @@ final class AccountStore: ObservableObject {
             return CommandResult(status: 1, output: error.localizedDescription)
         }
 
+        guard let codexURL = codexExecutableURL() else {
+            return CommandResult(
+                status: 127,
+                output: "Codex CLI was not found. Install or expose the Codex CLI, then try again."
+            )
+        }
+
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = ["codex", "-c", "cli_auth_credentials_store=\"file\"", "login"]
+        task.executableURL = codexURL
+        task.arguments = ["-c", "cli_auth_credentials_store=\"file\"", "login"]
         var environment = ProcessInfo.processInfo.environment
         environment["CODEX_HOME"] = homeURL.path
-        environment["PATH"] = effectiveLoginPath(environment["PATH"])
+        environment["PATH"] = effectiveLoginPath(environment["PATH"], codexURL: codexURL)
         task.environment = environment
 
         let pipe = Pipe()
@@ -999,10 +1006,72 @@ final class AccountStore: ObservableObject {
         return CommandResult(status: task.terminationStatus, output: output)
     }
 
-    private func effectiveLoginPath(_ currentPath: String?) -> String {
-        let fallback = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        guard let currentPath, !currentPath.isEmpty else { return fallback }
-        return "\(currentPath):\(fallback)"
+    private func codexExecutableURL() -> URL? {
+        let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser
+        var candidates: [URL] = []
+
+        func appendCandidate(_ url: URL) {
+            guard !candidates.contains(url) else { return }
+            candidates.append(url)
+        }
+
+        if let currentPath = ProcessInfo.processInfo.environment["PATH"] {
+            for entry in currentPath.split(separator: ":").map(String.init) where !entry.isEmpty {
+                let expandedEntry = (entry as NSString).expandingTildeInPath
+                appendCandidate(URL(fileURLWithPath: expandedEntry).appendingPathComponent("codex"))
+            }
+        }
+
+        for directory in [
+            home.appendingPathComponent(".local/bin"),
+            home.appendingPathComponent(".cargo/bin"),
+            home.appendingPathComponent(".bun/bin"),
+            URL(fileURLWithPath: "/opt/homebrew/bin"),
+            URL(fileURLWithPath: "/usr/local/bin"),
+            URL(fileURLWithPath: "/usr/bin"),
+            URL(fileURLWithPath: "/bin")
+        ] {
+            appendCandidate(directory.appendingPathComponent("codex"))
+        }
+
+        let vscodeExtensions = home
+            .appendingPathComponent(".vscode")
+            .appendingPathComponent("extensions")
+        if let entries = try? fileManager.contentsOfDirectory(
+            at: vscodeExtensions,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for entry in entries where entry.lastPathComponent.hasPrefix("openai.chatgpt-") {
+                appendCandidate(entry.appendingPathComponent("bin/macos-aarch64/codex"))
+                appendCandidate(entry.appendingPathComponent("bin/x86_64-apple-darwin/codex"))
+                appendCandidate(entry.appendingPathComponent("bin/codex"))
+            }
+        }
+
+        return candidates.first(where: { fileManager.isExecutableFile(atPath: $0.path) })
+    }
+
+    private func effectiveLoginPath(_ currentPath: String?, codexURL: URL) -> String {
+        var entries = currentPath?.split(separator: ":").map(String.init) ?? []
+        entries.insert(codexURL.deletingLastPathComponent().path, at: 0)
+        entries.append(contentsOf: [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin"
+        ])
+
+        var uniqueEntries: [String] = []
+        for entry in entries where !entry.isEmpty {
+            if !uniqueEntries.contains(entry) {
+                uniqueEntries.append(entry)
+            }
+        }
+        return uniqueEntries.joined(separator: ":")
     }
 
     private func profileNameForManagedHome(_ homeURL: URL, fallbackID: UUID) -> String {
