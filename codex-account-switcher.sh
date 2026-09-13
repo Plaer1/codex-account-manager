@@ -371,6 +371,17 @@ capture_into_profile() {
   mv "$env_tmp" "$env_file"
 }
 
+auth_issued_at() {
+  local token issued
+  token="$(jq -r '.tokens.access_token // .tokens.accessToken // empty' "$1" 2>/dev/null || true)"
+  issued="$(jwt_claim "$token" '.iat')"
+  if [[ "$issued" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$issued"
+  else
+    printf '0\n'
+  fi
+}
+
 save_auth_into_profile() {
   local name="$1"
   validate_profile_name "$name"
@@ -382,7 +393,22 @@ save_auth_into_profile() {
   profile_auth_matches_file "$name" "$CODEX_AUTH_FILE" || \
     fail "live auth belongs to a different account; refusing to overwrite profile '$name'"
 
-  atomic_copy_file "$CODEX_AUTH_FILE" "$(profile_auth_file "$name")"
+  local saved_auth recovery_dir live_issued saved_issued
+  saved_auth="$(profile_auth_file "$name")"
+  if cmp -s "$CODEX_AUTH_FILE" "$saved_auth"; then
+    return 0
+  fi
+  recovery_dir="$(profile_dir "$name")/auth/recovery"
+  mkdir -p "$recovery_dir"
+  atomic_copy_file "$CODEX_AUTH_FILE" "$recovery_dir/live-before-save-$(date -u '+%Y%m%dT%H%M%SZ')-$$.json"
+  live_issued="$(auth_issued_at "$CODEX_AUTH_FILE")"
+  saved_issued="$(auth_issued_at "$saved_auth")"
+  if [[ "$live_issued" -gt 0 && "$saved_issued" -gt "$live_issued" ]]; then
+    log "kept newer saved credentials for '$name'; archived the older live credentials"
+    return 0
+  fi
+  atomic_copy_file "$saved_auth" "$recovery_dir/saved-before-save-$(date -u '+%Y%m%dT%H%M%SZ')-$$.json"
+  atomic_copy_file "$CODEX_AUTH_FILE" "$saved_auth"
   update_auth_timestamp "$name"
 }
 
@@ -518,6 +544,13 @@ cmd_switch() {
   [[ -n "$outgoing_profile" ]] || \
     fail "live auth does not uniquely match a saved profile; refusing to discard it"
 
+  log "quitting $APP_NAME"
+  quit_codex
+  # Shutdown may rotate credentials. Snapshot only the final live auth so a
+  # failed transaction never restores the pre-shutdown refresh token.
+  outgoing_profile="$(resolve_live_profile 2>/dev/null || true)"
+  [[ -n "$outgoing_profile" ]] || fail "live auth changed during shutdown; refusing to overwrite it"
+
   SWITCH_TRANSACTION_DIR="$SWITCHER_HOME/.transaction.$$"
   mkdir "$SWITCH_TRANSACTION_DIR"
   chmod 700 "$SWITCH_TRANSACTION_DIR" 2>/dev/null || true
@@ -536,9 +569,6 @@ cmd_switch() {
   SWITCH_TRANSACTION_OUTGOING="$outgoing_profile"
   SWITCH_TRANSACTION_ACTIVE=1
   trap 'switch_transaction_exit' EXIT
-
-  log "quitting $APP_NAME"
-  quit_codex
 
   log "saving the refreshed outgoing auth before switching to '$name'"
   save_auth_into_profile "$outgoing_profile"
@@ -579,7 +609,8 @@ cmd_replace_auth() {
     atomic_copy_file "$saved_auth" "$recovery_dir/auth-before-reauth-$timestamp-$$.json"
   fi
 
-  if [[ "$(active_profile || true)" == "$name" ]]; then
+  # The marker can lag a manual login or a VS Code refresh. Use live identity.
+  if profile_auth_matches_file "$name" "$CODEX_AUTH_FILE"; then
     log "quitting $APP_NAME before replacing the active auth"
     quit_codex
     if [[ -s "$CODEX_AUTH_FILE" ]]; then

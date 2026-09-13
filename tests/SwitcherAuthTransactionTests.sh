@@ -124,4 +124,15 @@ if SWITCHER_HOME="$STORE_ROOT" CODEX_AUTH_FILE="$LIVE_ROOT/auth.json" "$PROJECT_
   exit 1
 fi
 
+# An older live login must not replace a newer saved credential when leaving
+# that account; switching must still succeed with the newer saved copy intact.
+new_payload="$(printf '{"sub":"subject-upduck1","email":"upduck1@example.com","iat":200}' | base64 | tr -d '\n=' | tr '/+' '_-')"
+old_payload="$(printf '{"sub":"subject-upduck1","email":"upduck1@example.com","iat":100}' | base64 | tr -d '\n=' | tr '/+' '_-')"
+jq --arg token "header.$new_payload.signature" '.tokens.access_token=$token' "$TEST_ROOT/fresh-auth.json" > "$STORE_ROOT/profiles/upduck1/auth/auth.json"
+jq --arg token "header.$old_payload.signature" '.tokens.access_token=$token' "$TEST_ROOT/fresh-auth.json" > "$LIVE_ROOT/auth.json"
+saved_before="$(shasum -a 256 "$STORE_ROOT/profiles/upduck1/auth/auth.json")"
+run_switch upduck2 >/dev/null
+[[ "$saved_before" == "$(shasum -a 256 "$STORE_ROOT/profiles/upduck1/auth/auth.json")" ]]
+cmp -s "$LIVE_ROOT/auth.json" "$STORE_ROOT/profiles/upduck2/auth/auth.json"
+
 printf '%s\n' 'Switcher auth transaction tests passed'
