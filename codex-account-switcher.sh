@@ -618,6 +618,8 @@ cmd_replace_auth() {
     fi
     atomic_copy_file "$codex_home/auth.json" "$saved_auth"
     atomic_copy_file "$codex_home/auth.json" "$CODEX_AUTH_FILE"
+    cmp -s "$codex_home/auth.json" "$saved_auth" && cmp -s "$codex_home/auth.json" "$CODEX_AUTH_FILE" || \
+      fail "auth changed during replacement; fresh login is retained in $codex_home"
     update_auth_timestamp "$name"
     printf '%s\n' "$name" | atomic_write_text "$ACTIVE_FILE"
     /usr/bin/open -a "$APP_NAME" >/dev/null 2>&1 || log "warning: could not open $APP_NAME"

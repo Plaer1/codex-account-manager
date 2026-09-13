@@ -699,15 +699,29 @@ final class AccountStore: ObservableObject {
                 return
             }
 
+            // A valid-looking JWT can already be revoked. Check the actual login
+            // before replacing a profile; never rotate its refresh token here.
+            if let validationError = self.validateLoginAccess(freshAuthURL) {
+                DispatchQueue.main.async {
+                    self.isWorking = false
+                    self.message = validationError + " Login files retained at " + homeURL.path
+                }
+                return
+            }
             let replaceResult = self.run(["replace-auth", targetProfile, homeURL.path])
-            try? FileManager.default.removeItem(at: homeURL)
+            let savedData = try? Data(contentsOf: self.profileAuthURL(targetProfile))
+            let freshData = try? Data(contentsOf: freshAuthURL)
+            let installed = replaceResult.status == 0 && freshData != nil && savedData == freshData
+            if installed {
+                try? FileManager.default.removeItem(at: homeURL)
+            }
             DispatchQueue.main.async {
                 self.isWorking = false
-                if replaceResult.status == 0 {
-                    self.message = "Updated the auth token for \(targetProfile)."
-                    self.reload(refreshUsage: false)
+                if installed {
+                    self.message = "Verified and saved login for \(targetProfile). Reload your VS Code windows to use the updated login."
+                    self.reload(refreshUsage: true)
                 } else {
-                    self.message = replaceResult.output.isEmpty ? "Could not update the auth token." : replaceResult.output
+                    self.message = "Login was not installed successfully. " + replaceResult.output + " Fresh login retained at " + homeURL.path
                 }
             }
         }
@@ -1004,6 +1018,33 @@ final class AccountStore: ObservableObject {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let output = String(data: data, encoding: .utf8) ?? ""
         return CommandResult(status: task.terminationStatus, output: output)
+    }
+
+    private func validateLoginAccess(_ authURL: URL) -> String? {
+        guard let token = codexAccessTokenReadOnly(authURL: authURL),
+              let url = URL(string: "https://chatgpt.com/backend-api/wham/usage") else {
+            return "The new login has no unexpired access token. Please sign in again."
+        }
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let finished = DispatchSemaphore(value: 0)
+        var status = 0
+        let task = URLSession.shared.dataTask(with: request) { _, response, _ in
+            status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            finished.signal()
+        }
+        task.resume()
+        guard finished.wait(timeout: .now() + 20) == .success else {
+            task.cancel()
+            return "Could not verify the new login: the usage service timed out."
+        }
+        debugLog("Re-authentication access validation HTTP \(status)")
+        if status == 401 { return "The server rejected the new login (401). Please sign in again." }
+        guard (200..<300).contains(status) else {
+            return "Could not verify the new login (HTTP \(status)); the saved profile was not replaced."
+        }
+        return nil
     }
 
     private func codexExecutableURL() -> URL? {
