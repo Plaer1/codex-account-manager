@@ -52,10 +52,11 @@ The app icon combines the Codex cloud, the supplied eye artwork, and the refresh
 
 ## Requirements
 
-- macOS.
-- OpenAI Codex Desktop App.
-- Swift compiler, usually installed with Xcode Command Line Tools.
-- `jq` for shell-side account identity checks (`brew install jq` if it is not already installed).
+- macOS: OpenAI Codex Desktop App, Swift compiler (usually installed with Xcode Command Line Tools), and Python 3.
+- Linux: Bash, Python 3 with PySide6, and an OpenAI Codex/ChatGPT desktop installation. `gtk-launch` and `xdg-open` are used for desktop integration.
+- KDE on Wayland additionally uses PyGObject, GTK 3 and an AppIndicator library to show the quick switcher as a native menu anchored to the tray icon. If unavailable, the standard Qt tray is used.
+- `zip` is optional on Linux and is only needed to export profile backups.
+- Account identity parsing uses Python 3's standard library; `jq` is no longer required.
 
 Check Swift:
 
@@ -78,30 +79,45 @@ git clone https://github.com/Plaer1/codex-account-manager.git
 cd codex-account-manager
 ```
 
-Build the app:
+### macOS
+
+Build and open the SwiftUI app:
 
 ```bash
-chmod +x build-app.sh codex-account-switcher.sh
-./build-app.sh
-```
-
-Open the app:
-
-```bash
+./build.sh
 open "build/Codex Account Manager Clanked Edition.app"
 ```
 
-After launch, the **Codex Account Manager: Clanked Edition** window should appear. If it does not, click the app in the Dock or choose **Window > Show Manager** from the macOS menu bar.
+The macOS app includes the full SwiftUI manager and menu-bar picker.
+
+### Linux beta
+
+The Linux build is beta quality. Its Qt interface, browser sign-in, account switching, usage display, and KDE tray integration are available; desktop behavior and login still need wider real-world validation. Close Codex before switching accounts or desktop state.
+
+Build and install the terminal manager and desktop-menu entry:
+
+```bash
+./build.sh
+./build/linux/install-linux.sh
+```
+
+The command is `codex-account-manager`; the desktop menu entry opens the account manager and its system tray menu. `codex-account-manager interactive` opens the terminal menu. Start a new shell after installation so the PATH update takes effect.
+
+The Linux window uses the desktop's Qt widget and color theme. Its account cards and tray show 5-hour and weekly usage when available. You can sign in through Codex in an isolated home, import an auth file, reauthenticate a profile, view account details and token status, set nicknames, and export backups. Reauthentication checks the fresh login with the usage service before replacing a saved profile and retains the new login files if verification fails.
+
+Choose **Add account** to open browser sign-in. The manager chooses an available profile name after login; you can rename it later. Sign-in follows the desktop's default browser even when a `BROWSER` environment override points elsewhere. **Capture current** saves the account already signed in on the machine. Left-click the tray icon for the quick switcher and hover an account to preview its usage. On KDE Wayland, the switcher is a native tray menu anchored to the status icon.
+
+On Linux, profiles are stored under `${XDG_DATA_HOME:-~/.local/share}/CodexAccountSwitcher`, Codex CLI auth is read from `~/.codex/auth.json`, and desktop state defaults to `${XDG_CONFIG_HOME:-~/.config}/Codex`. Override `CODEX_APP_SUPPORT` if your desktop app uses another state directory. Close Codex before making an account or desktop-state change; the Linux manager will refuse those operations while the app is running.
 
 ## Changed Workflows
 
 ### Make a Profile Active
 
-**Make Active Profile** updates the live `~/.codex/auth.json` and restarts Codex, so the selected profile is actually the account Codex is using. The outgoing live auth is saved first, and switching is refused if the identity cannot be matched safely.
+**Make Active Profile** updates the live `~/.codex/auth.json` so the selected profile is actually the account Codex is using. The outgoing live auth is saved first, and switching is refused if the identity cannot be matched safely. macOS can restart Codex automatically; on Linux, close the desktop app first.
 
 ### Keep Desktop State Separate
 
-The separate state action changes only the saved Codex Desktop state in `~/Library/Application Support/Codex`. It does not silently change the active auth profile, and both actions restart Codex so the result is live immediately.
+The separate state action changes only the saved Codex Desktop state. Its default location is `~/Library/Application Support/Codex` on macOS and `${XDG_CONFIG_HOME:-~/.config}/Codex` on Linux. It does not silently change the active auth profile.
 
 ### Recover a Profile
 
@@ -133,7 +149,8 @@ To require owner review before changes are merged, enable branch protection for 
 Profiles are stored at:
 
 ```text
-~/Library/Application Support/CodexAccountSwitcher
+macOS: ~/Library/Application Support/CodexAccountSwitcher
+Linux: ${XDG_DATA_HOME:-~/.local/share}/CodexAccountSwitcher
 ```
 
 Each profile uses this structure:
@@ -153,7 +170,7 @@ Profile backup zip files exported by the app contain the same sensitive data. St
 
 Codex Account Manager is local-first:
 
-- It does not upload tokens.
+- It sends saved access tokens to OpenAI's usage endpoint to request quota information; it does not send them to the app author or a custom server.
 - It does not send profile data to a custom server.
 - It does not store tokens in Git.
 - It does not log token values to files or terminal output.
@@ -166,6 +183,7 @@ After a successful build:
 
 ```text
 build/Codex Account Manager Clanked Edition.app
+build/linux/
 ```
 
 The `build/` directory is ignored by Git.
@@ -188,6 +206,7 @@ The release workflow will:
 - Package the app as a zip file.
 - Create a GitHub Release for tags that start with `v`.
 - Upload the zip as a release asset.
+- Build and upload the Linux desktop package as a CI artifact.
 
 The release asset is currently unsigned and not notarized. macOS may show a Gatekeeper warning until code signing and notarization are added.
 

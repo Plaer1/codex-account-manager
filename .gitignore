@@ -1,2 +1,21 @@
 build/
 .DS_Store
+.clanker/
+__pycache__/
+
+# Local credentials, profiles, and exported backups must stay private.
+auth.json
+credentials.json
+.env
+.env.*
+!.env.example
+profiles/
+managed-logins/
+usage-cache-linux.json
+active-profile
+active-state-profile
+*.pem
+*.key
+*.p12
+*.pfx
+*.zip

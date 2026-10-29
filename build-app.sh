@@ -9,7 +9,7 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR/lib"
 mkdir -p "$BUILD_DIR/module-cache"
 
 export CLANG_MODULE_CACHE_PATH="$BUILD_DIR/module-cache"
@@ -25,6 +25,8 @@ cp "$ROOT_DIR/resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$ROOT_DIR/resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 cp "$ROOT_DIR/resources/StatusIcon.png" "$RESOURCES_DIR/StatusIcon.png"
 cp "$ROOT_DIR/codex-account-switcher.sh" "$RESOURCES_DIR/codex-account-switcher.sh"
+cp "$ROOT_DIR/lib/"*.sh "$RESOURCES_DIR/lib/"
 chmod +x "$RESOURCES_DIR/codex-account-switcher.sh"
+chmod 644 "$RESOURCES_DIR/lib/"*.sh
 
 printf 'Built: %s\n' "$APP_DIR"

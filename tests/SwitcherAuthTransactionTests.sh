@@ -117,7 +117,8 @@ CODEX_APP_SUPPORT="$TEST_ROOT/app-support" \
 CODEX_APP_NAME="Codex Transaction Test" \
 "$PROJECT_ROOT/codex-account-switcher.sh" replace-auth upduck1 "$TEST_ROOT/fresh-home" >/dev/null
 cmp -s "$STORE_ROOT/profiles/upduck1/auth/auth.json" "$TEST_ROOT/fresh-home/auth.json"
-[[ -s "$STORE_ROOT/profiles/upduck1/auth/recovery"/auth-before-reauth-*.json ]]
+recovery_files=("$STORE_ROOT/profiles/upduck1/auth/recovery"/auth-before-reauth-*.json)
+[[ -s "${recovery_files[0]}" ]]
 
 if SWITCHER_HOME="$STORE_ROOT" CODEX_AUTH_FILE="$LIVE_ROOT/auth.json" "$PROJECT_ROOT/codex-account-switcher.sh" restore-reference-auth upduck1 >/dev/null 2>&1; then
   echo "FAIL: removed restore-reference-auth command is still supported" >&2

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON3="${CODEX_MANAGER_PYTHON:-/usr/bin/python3}"
+
+if [[ "${1:-}" == "gui" || "$#" -eq 0 ]]; then
+  if [[ "${1:-}" == "gui" ]]; then
+    shift
+  fi
+  exec "$PYTHON3" "$ROOT_DIR/ui-linux.py" "$@"
+fi
+
+if [[ "${1:-}" == "interactive" ]]; then
+  shift
+  exec "$ROOT_DIR/codex-account-switcher.sh" interactive "$@"
+elif [[ "$#" -eq 0 ]]; then
+  exec "$ROOT_DIR/codex-account-switcher.sh" interactive
+else
+  exec "$ROOT_DIR/codex-account-switcher.sh" "$@"
+fi
