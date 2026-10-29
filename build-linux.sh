@@ -7,7 +7,7 @@ BUILD_DIR="$ROOT_DIR/build/linux"
 command -v bash >/dev/null 2>&1 || { echo 'error: bash is required' >&2; exit 1; }
 PYTHON3="${CODEX_MANAGER_PYTHON:-/usr/bin/python3}"
 command -v "$PYTHON3" >/dev/null 2>&1 || { echo 'error: Python 3 is required' >&2; exit 1; }
-"$PYTHON3" -c 'from PySide6 import QtWidgets' 2>/dev/null || {
+"$PYTHON3" -c 'from PySide6 import QtWidgets' || {
   echo 'error: Python PySide6 is required to build the Linux UI' >&2
   exit 1
 }
