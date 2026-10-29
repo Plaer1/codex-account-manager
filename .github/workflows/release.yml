@@ -12,9 +12,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v0.3.0"
-        required: true
+        description: "Optional release tag, for example v0.3.0"
+        required: false
         type: string
+      linux_only:
+        description: "Build only the Linux beta artifact"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -55,6 +60,7 @@ jobs:
 
   build-release:
     name: Build and Release
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.linux_only }}
     runs-on: macos-latest
 
     steps:
@@ -87,7 +93,7 @@ jobs:
           if-no-files-found: error
 
       - name: Resolve Release Tag
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
         id: release
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -97,7 +103,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}

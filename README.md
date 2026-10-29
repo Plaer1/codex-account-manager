@@ -208,6 +208,8 @@ The release workflow will:
 - Upload the zip as a release asset.
 - Build and upload the Linux desktop package as a CI artifact.
 
+For a Linux beta artifact without a release, run the workflow manually with **Build only the Linux beta artifact** enabled and leave the release tag blank.
+
 The release asset is currently unsigned and not notarized. macOS may show a Gatekeeper warning until code signing and notarization are added.
 
 ## License
