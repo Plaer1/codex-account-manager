@@ -122,6 +122,7 @@ class Manager(QMainWindow):
         self.indicator_ready = False
         if not self.quitting:
             if QSystemTrayIcon.isSystemTrayAvailable(): self.tray.show()
+            elif not self.isVisible(): self.show_manager()
             self.status.setText('Native KDE tray unavailable; using the standard tray.')
 
     def update_indicator(self):
@@ -483,11 +484,12 @@ class Manager(QMainWindow):
         if self.workers: self.hide(); self.tray.setToolTip('Finishing account requests…')
         else: self.tray.hide(); QApplication.quit()
     def closeEvent(self,event):
-        if not self.quitting and (self.indicator_ready or self.tray.isVisible()): self.hide(); event.ignore()
+        indicator_starting = self.indicator_process and self.indicator_process.state() != QProcess.ProcessState.NotRunning
+        if not self.quitting and (self.indicator_ready or indicator_starting or self.tray.isVisible()): self.hide(); event.ignore()
         elif self.workers: event.ignore(); self.quit_app()
-        else: event.accept()
+        else: event.accept(); self.quit_app()
 
 def main():
-    app=QApplication(sys.argv); app.setApplicationName('Codex Account Manager'); app.setDesktopFileName('codex-account-manager'); app.setQuitOnLastWindowClosed(True)
+    app=QApplication(sys.argv); app.setApplicationName('Codex Account Manager'); app.setDesktopFileName('codex-account-manager'); app.setQuitOnLastWindowClosed(False)
     window=Manager(); window.show(); return app.exec()
 if __name__ == '__main__': raise SystemExit(main())

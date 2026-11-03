@@ -81,7 +81,7 @@ TryExec=$INSTALL_DIR/codex-account-manager
 Exec="$exec_path"
 Icon=$icon_path
 Terminal=false
-Categories=Utility;
+Categories=Development;
 EOF
 chmod 644 "$DESKTOP_FILE"
 

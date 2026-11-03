@@ -37,7 +37,7 @@ Codex Account Manager: Clanked Edition keeps the local-first workflow and focuse
 ### Clanked branding
 
 - Renamed the app **Codex Account Manager: Clanked Edition**.
-- Added a transparent eye-cloud icon with the original refresh arrows preserved.
+- Replaced the eye-cloud branding with the Open Clank eye framed by three rotating arrows.
 - Keep profile and token data local; nothing is uploaded by the app itself.
 
 ## Screenshots
@@ -46,9 +46,9 @@ The compact menu-bar picker surfaces current usage and account switching without
 
 ![Codex Account Manager menu-bar usage picker](docs/screenshots/menu-bar-usage.png)
 
-The app icon combines the Codex cloud, the supplied eye artwork, and the refresh arrows:
+The app icon uses the supplied Open Clank eye with the rotating arrows as its frame:
 
-![Codex Account Manager Clanked Edition eye-cloud icon](resources/AppIconClanked.png)
+![Codex Account Manager Open Clank eye icon](resources/AppIconClanked.png)
 
 ## Requirements
 
