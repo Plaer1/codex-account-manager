@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Linux desktop and tray interface for Codex Account Manager."""
 import os
+import gc
 import re
 import json
 import shutil
@@ -490,6 +491,10 @@ class Manager(QMainWindow):
         else: event.accept(); self.quit_app()
 
 def main():
+    # Qt objects must be finalized on the GUI thread. Automatic cyclic GC can
+    # otherwise run while a Python worker is allocating objects.
+    gc.disable()
     app=QApplication(sys.argv); app.setApplicationName('Codex Account Manager'); app.setDesktopFileName('codex-account-manager'); app.setQuitOnLastWindowClosed(False)
+    gc_timer = QTimer(); gc_timer.timeout.connect(gc.collect); gc_timer.start(30000)
     window=Manager(); window.show(); return app.exec()
 if __name__ == '__main__': raise SystemExit(main())
